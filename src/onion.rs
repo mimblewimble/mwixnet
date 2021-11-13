@@ -93,7 +93,7 @@ fn calc_blinding_factor(shared_secret: &SharedSecret, ephemeral_pubkey: &PublicK
 }
 
 fn new_stream_cipher(shared_secret: &SharedSecret) -> Result<ChaCha20> {
-    let mut mu_hmac = HmacSha256::new_from_slice(b"PAYLOAD")?;
+    let mut mu_hmac = HmacSha256::new_from_slice(b"MWIXNET")?;
     mu_hmac.update(&shared_secret[0..32]);
     let mukey = mu_hmac.finalize().into_bytes();
 

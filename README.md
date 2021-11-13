@@ -1,9 +1,10 @@
 # MWixnet
-MW CoinSwap Server
+This is an implementation of @tromp's [CoinSwap Proposal](https://forum.grin.mw/t/mimblewimble-coinswap-proposal/8322) with some slight modifications.
 
-## APIs
-### swap
-The server configured to be the entry server (node 1) exposes a JSON-RPC `swap` API for use by GRIN wallets.
+A set of n CoinSwap servers (node<sub>i</sub> with i=1...n) are agreed upon in advance. They each have a known public key.
+
+### SWAP API
+The first CoinSwap server (n<sub>1</sub>) provides the `swap` API, publicly available for use by GRIN wallets.
 
 **jsonrpc:** `2.0`
 **method:** `swap`
@@ -19,3 +20,27 @@ The server configured to be the entry server (node 1) exposes a JSON-RPC `swap` 
     }
 }]
 ```
+
+### Data Provisioning
+#### Inputs
+* C<sub>in</sub>: UTXO commitment to swap
+* x<sub>in</sub>: Blinding factor of C<sub>in</sub>
+* K<sub>1...n</sub>: The public keys of all n servers
+
+#### Procedure
+<ol>
+    <li>Choose random x<sub>i</sub> for each node n<sub>i</sub> and create a Payload (P<sub>i</sub>) for each containing x<sub>i</sub></li>
+    <li>Build a rangeproof for C<sub>n</sub>=C<sub>in</sub>+(Σx<sub>1...n</sub>)*G and include it in payload P<sub>n</sub></li>
+    <li>Choose random initial ephemeral keypair (r<sub>1</sub>, R<sub>1</sub>)</li>
+    <li>Derive remaining ephemeral keypairs such that r<sub>i+1</sub>=r<sub>i</sub>*Sha256(R<sub>i</sub>||s<sub>i</sub>) where s<sub>i</sub>=ECDH(R<sub>i</sub>, K<sub>i</sub>)</li>
+    <li>For each node n<sub>i</sub>, use ChaCha20 stream cipher with key=HmacSha256("MWIXNET"||s<sub>i</sub>) and nonce "NONCE1234567" to encrypt payloads P<sub>i...n</sub></li>
+</ol>
+
+### Input Validation
+
+* Node n<sub>1</sub> verifies that C<sub>in</sub> is in the current UTXO set
+* Node n<sub>1</sub> verifies the commitment signature is valid for C<sub>in</sub>, proving ownership of the input
+
+----
+
+`Output derivation`, `Output validation`, `Kernel derivation`, and `Aggregation` steps remain unchanged from the [original design](https://forum.grin.mw/t/mimblewimble-coinswap-proposal/8322)

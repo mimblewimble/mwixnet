@@ -163,6 +163,8 @@ mod tests {
         Ok(response_str)
     }
 
+    /// Single hop to demonstrate request validation and onion unwrapping.
+    /// UTXO creation and bulletproof generation reserved for milestones 2 & 3.
     #[test]
     fn swap_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
         let server_key = secp::insecure_rand_secret()?;
