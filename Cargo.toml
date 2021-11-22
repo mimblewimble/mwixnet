@@ -1,0 +1,28 @@
+[package]
+name = "mwixnet"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+blake2 = { package = "blake2-rfc", version = "0.2"}
+byteorder = "1"
+bytes = "0.5.6"
+chacha20 = "0.8.1"
+failure = "0.1.8"
+futures = "0.3"
+hmac = { version = "0.11.0", features = ["std"]}
+hyper = { version = "0.14", features = ["full"] }
+jsonrpc-core = "18.0"
+jsonrpc-derive = "18.0"
+jsonrpc-http-server = "18.0"
+lazy_static = "1"
+rand = "0.8.4"
+serde = { version = "1", features= ["derive"]}
+serde_derive = "1"
+serde_json = "1"
+sha2 = "0.9.8"
+tokio = { version = "1", features = ["full"] }
+grin_secp256k1zkp = { version = "0.7.11", features = ["bullet-proof-sizing"]}
+grin_util = "5"
