@@ -5,12 +5,13 @@ use crate::ser;
 
 use chacha20::{ChaCha20, Key, Nonce};
 use chacha20::cipher::{NewCipher, StreamCipher};
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Create an Onion for the Commitment, encrypting the payload for each hop
+#[allow(dead_code)] // used by component tests
 pub fn create_onion(commitment: &Commitment, session_key: &SecretKey, hops: &Vec<Hop>) -> Result<Onion> {
     let secp = Secp256k1::new();
     let mut ephemeral_key = session_key.clone();
@@ -71,6 +72,7 @@ pub fn peel_layer(onion: &Onion, secret_key: &SecretKey) -> Result<(Payload, Oni
 
     let mut commitment = onion.commit.clone();
     commitment = secp::add_excess(&commitment, &decrypted_payload.excess)?;
+    commitment = secp::sub_value(&commitment, decrypted_payload.fee.into())?;
 
     let peeled_onion = Onion{
         ephemeral_pubkey: ephemeral_pubkey,
@@ -109,30 +111,35 @@ mod tests {
     use super::super::types;
     use super::super::onion;
 
+    use grin_core::core::FeeFields;
+    
     /// Test end-to-end Onion creation and unwrapping logic.
     #[test]
     fn onion() {
-        let value : u64 = 1000;
-        let blind = secp::insecure_rand_secret().unwrap(); 
-        let commitment = secp::commit(value, &blind).unwrap();
+        let total_fee : u64 = 10;
+        let fee_per_hop : u64 = 2;
+        let in_value : u64 = 1000;
+        let out_value : u64 = in_value - total_fee;
+        let blind = secp::random_secret(); 
+        let commitment = secp::commit(in_value, &blind).unwrap();
     
-        let session_key = secp::insecure_rand_secret().unwrap();
+        let session_key = secp::random_secret();
         let mut hops : Vec<types::Hop> = Vec::new();
     
         let mut keys : Vec<secp::SecretKey> = Vec::new();
-        let mut final_commit = commitment.clone();
+        let mut final_commit = secp::commit(out_value, &blind).unwrap();
         let mut final_blind = blind.clone();
         for i in 0..5 {
-            keys.push(secp::insecure_rand_secret().unwrap());
+            keys.push(secp::random_secret());
     
-            let excess = secp::insecure_rand_secret().unwrap();
+            let excess = secp::random_secret();
     
             let secp = secp256k1zkp::Secp256k1::with_caps(secp256k1zkp::ContextFlag::Commit);
             final_blind.add_assign(&secp, &excess).unwrap();
             final_commit = secp::add_excess(&final_commit, &excess).unwrap();
             let proof = if i == 4 {
-                let n1 = secp::insecure_rand_secret().unwrap();
-                let rp = secp.bullet_proof(value, final_blind.clone(), n1.clone(), n1.clone(), None, None);
+                let n1 = secp::random_secret();
+                let rp = secp.bullet_proof(out_value, final_blind.clone(), n1.clone(), n1.clone(), None, None);
                 assert!(secp.verify_bullet_proof(final_commit, rp, None).is_ok());
                 Some(rp)
             } else {
@@ -143,6 +150,7 @@ mod tests {
                 pubkey: secp::PublicKey::from_secret_key(&secp, &keys[i]).unwrap(),
                 payload: types::Payload{
                     excess: excess,
+                    fee: FeeFields::from(fee_per_hop as u32),
                     rangeproof: proof,
                 }
             });
@@ -151,7 +159,8 @@ mod tests {
         let mut onion_packet = onion::create_onion(&commitment, &session_key, &hops).unwrap();
     
         let mut payload = types::Payload{
-            excess: secp::insecure_rand_secret().unwrap(),
+            excess: secp::random_secret(),
+            fee: FeeFields::from(fee_per_hop as u32),
             rangeproof: None
         };
         for i in 0..5 {
@@ -162,6 +171,7 @@ mod tests {
     
         assert!(payload.rangeproof.is_some());
         assert_eq!(payload.rangeproof.unwrap(), hops[4].payload.rangeproof.unwrap());
-        assert_eq!(secp::commit(value, &final_blind).unwrap(), final_commit);
+        assert_eq!(secp::commit(out_value, &final_blind).unwrap(), final_commit);
+        assert_eq!(payload.fee, FeeFields::from(fee_per_hop as u32));
     }
 }

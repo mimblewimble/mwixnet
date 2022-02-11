@@ -1,6 +1,7 @@
 use failure::{self, Context, Fail};
 use std::fmt::{self, Display};
 use std::io;
+use grin_wallet_libwallet as libwallet;
 
 /// MWixnet error definition
 #[derive(Debug)]
@@ -45,6 +46,27 @@ pub enum ErrorKind {
     /// When asked to read too much data
     #[fail(display = "TooLargeReadErr")]
     TooLargeReadErr,
+    /// Error from grin's api crate
+    #[fail(display = "GRIN API Error")]
+    GrinApiError,
+    /// Error from grin core
+    #[fail(display = "grincore Error")]
+    GrinCoreError,
+    /// Error from grin-wallet's libwallet
+    #[fail(display = "libwallet Error")]
+    LibWalletError,
+    /// Error from serde-json
+    #[fail(display = "serde json Error")]
+    SerdeJsonError,
+    /// Error from invalid signature
+    #[fail(display = "invalid signature Error")]
+    InvalidSigError,
+    /// Error while saving config
+    #[fail(display = "save config Error")]
+    SaveConfigError,
+    /// Error while loading config
+    #[fail(display = "load config Error")]
+    LoadConfigError,
 }
 
 impl std::error::Error for Error {
@@ -70,6 +92,12 @@ impl Display for Error {
 }
 
 impl Error {
+    pub fn new(kind: ErrorKind) -> Error {
+        Error {
+            inner: Context::new(kind),
+        }
+    }
+
     pub fn kind(&self) -> ErrorKind {
         self.inner.get_context().clone()
     }
@@ -101,10 +129,50 @@ impl From<secp256k1zkp::Error> for Error {
     }
 }
 
-impl From<hmac::crypto_mac::InvalidKeyLength> for Error {
-    fn from(_error: hmac::crypto_mac::InvalidKeyLength) -> Error {
+impl From<hmac::digest::InvalidLength> for Error {
+    fn from(_error: hmac::digest::InvalidLength) -> Error {
         Error {
             inner: Context::new(ErrorKind::InvalidKeyLength),
+        }
+    }
+}
+
+impl From<grin_api::Error> for Error {
+    fn from(_error: grin_api::Error) -> Error {
+        Error {
+            inner: Context::new(ErrorKind::GrinApiError),
+        }
+    }
+}
+
+impl From<grin_api::json_rpc::Error> for Error {
+    fn from(_error: grin_api::json_rpc::Error) -> Error {
+        Error {
+            inner: Context::new(ErrorKind::GrinApiError),
+        }
+    }
+}
+
+impl From<grin_core::core::transaction::Error> for Error {
+    fn from(_error: grin_core::core::transaction::Error) -> Error {
+        Error {
+            inner: Context::new(ErrorKind::GrinCoreError),
+        }
+    }
+}
+
+impl From<libwallet::Error> for Error {
+    fn from(_error: libwallet::Error) -> Error {
+        Error {
+            inner: Context::new(ErrorKind::LibWalletError),
+        }
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(_error: serde_json::Error) -> Error {
+        Error {
+            inner: Context::new(ErrorKind::SerdeJsonError),
         }
     }
 }

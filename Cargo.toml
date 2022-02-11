@@ -10,19 +10,31 @@ blake2 = { package = "blake2-rfc", version = "0.2"}
 byteorder = "1"
 bytes = "0.5.6"
 chacha20 = "0.8.1"
+clap = { version = "2.33", features = ["yaml"] }
 failure = "0.1.8"
 futures = "0.3"
-hmac = { version = "0.11.0", features = ["std"]}
+hmac = { version = "0.12.0", features = ["std"]}
 hyper = { version = "0.14", features = ["full"] }
 jsonrpc-core = "18.0"
 jsonrpc-derive = "18.0"
 jsonrpc-http-server = "18.0"
 lazy_static = "1"
+pbkdf2 = "0.8.0"
 rand = "0.8.4"
+ring = "0.16"
 serde = { version = "1", features= ["derive"]}
 serde_derive = "1"
 serde_json = "1"
-sha2 = "0.9.8"
+sha2 = "0.10.0"
 tokio = { version = "1", features = ["full"] }
+toml = "0.5"
 grin_secp256k1zkp = { version = "0.7.11", features = ["bullet-proof-sizing"]}
 grin_util = "5"
+grin_api = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
+grin_core = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
+grin_chain = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
+grin_keychain = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
+grin_servers = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
+grin_wallet_api = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.1.0-alpha.1" }
+grin_wallet_impls = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.1.0-alpha.1" }
+grin_wallet_libwallet = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.1.0-alpha.1" }

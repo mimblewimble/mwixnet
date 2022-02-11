@@ -1,6 +1,8 @@
 use crate::error::{ErrorKind, Result};
 use crate::secp::{Commitment, PublicKey, RangeProof, SecretKey, Secp256k1};
 use crate::ser::{self, BinReader, Readable, Reader, Writeable, Writer};
+
+use grin_core::core::FeeFields;
 use grin_util::{self, ToHex};
 use serde::{Deserialize, Serialize};
 use serde::ser::SerializeStruct;
@@ -14,6 +16,7 @@ const CURRENT_VERSION : u8 = 0;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Payload {
     pub excess: SecretKey,
+    pub fee: FeeFields,
     pub rangeproof: Option<RangeProof>,
 }
 
@@ -25,6 +28,7 @@ impl Readable for Payload {
         }
 
         let excess = SecretKey::read(reader)?;
+        let fee = FeeFields::try_from(reader.read_u64()?)?;
         let rangeproof = if reader.read_u8()? == 0 {
             None
         } else {
@@ -33,6 +37,7 @@ impl Readable for Payload {
 
         let payload = Payload {
             excess: excess,
+            fee: fee,
             rangeproof: rangeproof
         };
         Ok(payload)
@@ -43,6 +48,7 @@ impl Writeable for Payload {
     fn write<W: Writer>(&self, writer: &mut W) -> Result<()> {
         writer.write_u8(CURRENT_VERSION)?;
         writer.write_fixed_bytes(&self.excess)?;
+        writer.write_u64(self.fee.into())?;
 
         match &self.rangeproof {
             Some(proof) => {
@@ -71,6 +77,7 @@ pub struct Hop {
     pub payload: Payload,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Onion {
     pub ephemeral_pubkey: PublicKey,
     pub commit: Commitment,

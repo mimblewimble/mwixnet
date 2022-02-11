@@ -1,0 +1,37 @@
+name: mwixnet
+about: MWixnet CoinSwap Server
+author: scilio
+
+args:
+  - config_file:
+      help: Path to load/save the mwixnet-config.toml configuration file
+      short: c
+      long: config_file
+      takes_value: true
+  - pass:
+      help: Password to encrypt/decrypt the server key in the configuration file
+      short: p
+      long: pass
+      takes_value: true
+      required: true
+  - grin_node_url:
+      help: Api address of running GRIN node on which to check inputs and post transactions
+      short: n
+      long: grin_node_url
+      takes_value: true
+  - wallet_owner_url:
+      help: Api address of running wallet owner listener
+      short: l
+      long: wallet_owner_url
+      takes_value: true
+  - wallet_pass:
+      help: The wallet's password
+      long: wallet_pass
+      takes_value: true
+  - bind_addr:
+      help: Address to bind the rpc server to (e.g. 0.0.0.0:3000)
+      long: bind_addr
+      takes_value: true
+subcommands:
+  - init-config:
+      about: Writes a new configuration file
