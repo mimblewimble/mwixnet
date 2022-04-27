@@ -24,6 +24,12 @@ pub trait GrinNode : Send + Sync {
     fn post_tx(&self, tx: &Transaction) -> Result<()>;
 }
 
+/// Checks if a commitment is in the UTXO set
+pub fn is_unspent(node: &Arc<dyn GrinNode>, commit: &Commitment) -> Result<bool> {
+    let utxo = node.get_utxo(&commit)?;
+    Ok(utxo.is_some())
+}
+
 /// Checks whether a commitment is spendable at the block height provided
 pub fn is_spendable(node: &Arc<dyn GrinNode>, output_commit: &Commitment, next_block_height: u64) -> Result<bool> {
     let output = node.get_utxo(&output_commit)?;

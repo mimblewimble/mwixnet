@@ -1,37 +1,40 @@
 use crate::config::ServerConfig;
 use crate::node::{self, GrinNode};
 use crate::onion::Onion;
-use crate::secp::{self, ComSignature, Secp256k1, SecretKey};
+use crate::secp::{self, Commitment, ComSignature, RangeProof, Secp256k1, SecretKey};
 use crate::wallet::{self, Wallet};
 
 use grin_core::core::{Input, Output, OutputFeatures, TransactionBody};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
 use grin_util::StopState;
+use itertools::Itertools;
 use jsonrpc_derive::rpc;
 use jsonrpc_http_server::*;
 use jsonrpc_http_server::jsonrpc_core::*;
 use jsonrpc_core::{Result, Value};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Submission {
-    pub excess: SecretKey,
-    pub output: Option<Output>,
-    pub input: Input,
-    pub fee: u64,
-    pub onion: Onion,
+struct Submission {
+    excess: SecretKey,
+    output_commit: Commitment,
+    rangeproof: Option<RangeProof>,
+    input: Input,
+    fee: u64,
+    onion: Onion,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct SwapReq {
-    pub onion: Onion,
+    onion: Onion,
     #[serde(with = "secp::comsig_serde")]
-    pub comsig: ComSignature,
+    comsig: ComSignature,
 }
 
 lazy_static! {
-    static ref SERVER_STATE: Mutex<Vec<Submission>> = Mutex::new(Vec::new());
+    static ref SERVER_STATE: Mutex<HashMap<Commitment, Submission>> = Mutex::new(HashMap::new());
 }
 
 #[rpc(server)]
@@ -45,7 +48,7 @@ pub trait Server {
 }
 
 #[derive(Clone)]
-pub struct ServerImpl {
+struct ServerImpl {
     server_config: ServerConfig,
     stop_state: Arc<StopState>,
     wallet: Arc<dyn Wallet>,
@@ -53,7 +56,7 @@ pub struct ServerImpl {
 }
 
 impl ServerImpl {
-    pub fn new(server_config: ServerConfig, stop_state: Arc<StopState>, wallet: Arc<dyn Wallet>, node: Arc<dyn GrinNode>) -> Self {
+    fn new(server_config: ServerConfig, stop_state: Arc<StopState>, wallet: Arc<dyn Wallet>, node: Arc<dyn GrinNode>) -> Self {
         ServerImpl { server_config, stop_state, wallet, node }
     }
 
@@ -72,13 +75,16 @@ impl ServerImpl {
     /// and assemble the coinswap transaction, posting the transaction to the configured node.
     /// 
     /// Currently only a single mix node is used. Milestone 3 will include support for multiple mix nodes.
-    pub fn execute_round(&self) -> crate::error::Result<()> {
+    fn execute_round(&self) -> crate::error::Result<()> {
         let mut locked_state = SERVER_STATE.lock().unwrap();
         let next_block_height = self.node.get_chain_height()? + 1;
 
         let spendable : Vec<Submission> = locked_state
-            .iter()
+            .values()
+            .into_iter()
+            .unique_by(|s| s.output_commit)
             .filter(|s| node::is_spendable(&self.node, &s.input.commit, next_block_height).unwrap_or(false))
+            .filter(|s| !node::is_unspent(&self.node, &s.output_commit).unwrap_or(true))
             .cloned()
             .collect();
 
@@ -101,7 +107,7 @@ impl ServerImpl {
         let outputs : Vec<Output> = spendable
             .iter()
             .enumerate()
-            .filter_map(|(_, s)| s.output)
+            .map(|(_, s)| Output::new(OutputFeatures::Plain, s.output_commit, s.rangeproof.unwrap()))
             .collect();
         
         let excesses : Vec<SecretKey> = spendable
@@ -122,6 +128,11 @@ impl ServerImpl {
 impl Server for ServerImpl {
     /// Implements the 'swap' API
     fn swap(&self, swap: SwapReq) -> Result<Value> {
+        // milestone 3: check that enc_payloads length matches number of configured servers
+        if swap.onion.enc_payloads.len() != 1 {
+            return Err(jsonrpc_core::Error::invalid_params("Multi server not supported until milestone 3"));
+        }
+
         // Verify commitment signature to ensure caller owns the output
         let serialized_onion = swap.onion.serialize()
             .map_err(|_| jsonrpc_core::Error::internal_error())?;
@@ -149,18 +160,24 @@ impl Server for ServerImpl {
             .map_err(|_| jsonrpc_core::Error::internal_error())?;
 
         // Verify the bullet proof and build the final output
-        let output = match peeled.0.rangeproof {
-            Some(r) => {
-                let secp = Secp256k1::with_caps(secp256k1zkp::ContextFlag::Commit);
-                secp.verify_bullet_proof(output_commit, r, None)
-                    .map_err(|_| jsonrpc_core::Error::invalid_params("RangeProof invalid"))?;
-                Some(Output::new(OutputFeatures::Plain, output_commit, r))
-            },
-            None => None
-        };
-        SERVER_STATE.lock().unwrap().push(Submission{
+        if let Some(r) = peeled.0.rangeproof {
+            let secp = Secp256k1::with_caps(secp256k1zkp::ContextFlag::Commit);
+            secp.verify_bullet_proof(output_commit, r, None)
+                .map_err(|_| jsonrpc_core::Error::invalid_params("RangeProof invalid"))?;
+        } else {
+            // milestone 3: only the last hop will have a rangeproof 
+            return Err(jsonrpc_core::Error::invalid_params("Rangeproof expected"));
+        }
+
+        let mut locked = SERVER_STATE.lock().unwrap();
+        if locked.contains_key(&swap.onion.commit) {
+            return Err(jsonrpc_core::Error::invalid_params("swap already called for coin"));
+        }
+
+        locked.insert(swap.onion.commit, Submission{
             excess: peeled.0.excess,
-            output: output,
+            output_commit: output_commit,
+            rangeproof: peeled.0.rangeproof,
             input: input,
             fee: fee,
             onion: peeled.1
