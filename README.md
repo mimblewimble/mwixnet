@@ -3,6 +3,20 @@ This is an implementation of @tromp's [CoinSwap Proposal](https://forum.grin.mw/
 
 A set of n CoinSwap servers (node<sub>i</sub> with i=1...n) are agreed upon in advance. They each have a known public key.
 
+### Setup
+#### init-config
+To setup a new server, run `mwixnet --pass "server-password-here" init-config`.
+This will generate a key for the server and then create a new config file named `mwixnet-config.toml` in the current working directory.
+The configuration file will contain the private key of the server encrypted with the server password you provided.
+
+**Back this config file up! It's the only copy of the server's private key!**
+
+#### Wallet
+A grin-wallet account must be created for receiving extra mwixnet fees.
+
+### Usage
+With your wallet and fully synced node both online and listening at the addresses configured, the mwixnet server can be started by running `mwixnet --pass "server-password-here" --wallet_pass "wallet-password-here"`
+
 ### SWAP API
 The first CoinSwap server (n<sub>1</sub>) provides the `swap` API, publicly available for use by GRIN wallets.
 

@@ -14,22 +14,31 @@ use std::path::PathBuf;
 // The decrypted server config to be passed around and used by the rest of the mwixnet code
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ServerConfig {
+	/// private key used by the server to decrypt onion packets
 	pub key: SecretKey,
+	/// interval (in seconds) to wait before each mixing round
 	pub interval_s: u32,
+	/// socket address the server listener should bind to
 	pub addr: SocketAddr,
+	/// foreign api address of the grin node
 	pub grin_node_url: SocketAddr,
+	/// owner api address of the grin wallet
 	pub wallet_owner_url: SocketAddr,
 }
 
-/// Encrypted server key, for storing on disk and decrypting with provided password
+/// Encrypted server key, for storing on disk and decrypting with a password.
+/// Includes a salt used by key derivation and a nonce used when sealing the encrypted data.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct EncryptedServerKey {
 	encrypted_key: String,
-	pub salt: String,
-	pub nonce: String,
+	salt: String,
+	nonce: String,
 }
 
 impl EncryptedServerKey {
+	/// Generates a random salt for pbkdf2 key derivation and a random nonce for aead sealing.
+	/// Then derives an encryption key from the password and salt. Finally, it encrypts and seals
+	/// the server key with chacha20-poly1305 using the derived key and random nonce. 
 	pub fn from_secret_key(
 		server_key: &SecretKey,
 		password: &ZeroingString,
@@ -104,13 +113,13 @@ impl EncryptedServerKey {
 /// The config attributes saved to disk
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct RawConfig {
-	pub encrypted_key: String,
-	pub salt: String,
-	pub nonce: String,
-	pub interval_s: u32,
-	pub addr: SocketAddr,
-	pub grin_node_url: SocketAddr,
-	pub wallet_owner_url: SocketAddr,
+	encrypted_key: String,
+	salt: String,
+	nonce: String,
+	interval_s: u32,
+	addr: SocketAddr,
+	grin_node_url: SocketAddr,
+	wallet_owner_url: SocketAddr,
 }
 
 /// Writes the server config to the config_path given, encrypting the server_key first.

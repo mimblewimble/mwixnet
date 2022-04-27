@@ -6,6 +6,7 @@ use wallet::HttpWallet;
 use clap::App;
 use grin_util::{StopState, ZeroingString};
 use std::env;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,7 +27,16 @@ mod wallet;
 
 const DEFAULT_INTERVAL: u32 = 12 * 60 * 60;
 
-fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn main() {
+	if let Err(e) = real_main() {
+        io::stderr().write_all(format!("mwixnet server exited with error:\n{}\n", e).as_bytes()).unwrap();
+        std::process::exit(1);
+    }
+
+	std::process::exit(0);
+}
+
+fn real_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 	let yml = load_yaml!("../mwixnet.yml");
 	let args = App::from_yaml(yml).get_matches();
     
@@ -61,6 +71,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         };
 
         config::write_config(&config_path, &server_config, &password)?;
+        println!("Config file written to {:?}. Please back this file up in a safe place.", config_path);
         return Ok(());
     }
 
