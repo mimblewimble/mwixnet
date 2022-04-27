@@ -10,13 +10,11 @@ pub struct Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+pub type StdResult<T, E> = std::result::Result<T, E>;
 
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
 /// MWixnet error types
 pub enum ErrorKind {
-    /// Unsupported payload version
-    #[fail(display = "Unsupported Payload Version")]
-    UnsupportedPayload,
     /// Error from secp256k1-zkp library
     #[fail(display = "Secp Error")]
     SecpError,
@@ -29,23 +27,9 @@ pub enum ErrorKind {
         String,
         io::ErrorKind,
     ),
-    /// Expected a given value that wasn't found
-    #[fail(display = "UnexpectedData")]
-    UnexpectedData {
-        /// What we wanted
-        expected: Vec<u8>,
-        /// What we got
-        received: Vec<u8>,
-    },
     /// Data wasn't in a consumable format
     #[fail(display = "CorruptedData")]
     CorruptedData,
-    /// Incorrect number of elements (when deserializing a vec via read_multi say).
-    #[fail(display = "CountError")]
-    CountError,
-    /// When asked to read too much data
-    #[fail(display = "TooLargeReadErr")]
-    TooLargeReadErr,
     /// Error from grin's api crate
     #[fail(display = "GRIN API Error")]
     GrinApiError,
@@ -85,6 +69,14 @@ impl From<io::ErrorKind> for Error {
     }
 }
 
+impl From<grin_core::ser::Error> for Error {
+    fn from(_e: grin_core::ser::Error) -> Error {
+        Error {
+            inner: Context::new(ErrorKind::GrinCoreError),
+        }
+    }
+}
+
 impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Display::fmt(&self.inner, f)
@@ -96,10 +88,6 @@ impl Error {
         Error {
             inner: Context::new(kind),
         }
-    }
-
-    pub fn kind(&self) -> ErrorKind {
-        self.inner.get_context().clone()
     }
 
     pub fn message(&self) -> String {

@@ -1,11 +1,13 @@
 use config::ServerConfig;
 use error::{Error, ErrorKind};
-use wallet::Wallet;
+use node::HttpGrinNode;
+use wallet::HttpWallet;
 
 use clap::App;
-use grin_util::ZeroingString;
+use grin_util::{StopState, ZeroingString};
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[macro_use]
 extern crate lazy_static;
@@ -18,10 +20,11 @@ mod error;
 mod node;
 mod onion;
 mod secp;
-mod ser;
 mod server;
 mod types;
 mod wallet;
+
+const DEFAULT_INTERVAL: u32 = 12 * 60 * 60;
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 	let yml = load_yaml!("../mwixnet.yml");
@@ -38,6 +41,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let password = args.value_of("pass").ok_or(Error::new(ErrorKind::LoadConfigError))?;
     let password = ZeroingString::from(password);
 
+    let round_time = args.value_of("round_time").map(|t| t.parse::<u32>().unwrap() );
     let bind_addr = args.value_of("bind_addr");
     let grin_node_url = args.value_of("grin_node_url");
     let wallet_owner_url = args.value_of("wallet_owner_url");
@@ -50,6 +54,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         let server_config = ServerConfig {
             key: secp::random_secret(),
+            interval_s: round_time.unwrap_or(DEFAULT_INTERVAL),
             addr: bind_addr.unwrap_or("0.0.0.0:3000").parse()?,
             grin_node_url: grin_node_url.unwrap_or("127.0.0.1:3413").parse()?,
             wallet_owner_url: wallet_owner_url.unwrap_or("127.0.0.1:3420").parse()?,
@@ -79,13 +84,24 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Open wallet
     let wallet_pass = args.value_of("wallet_pass").ok_or(error::Error::new(error::ErrorKind::LoadConfigError))?;
     let wallet_pass = grin_util::ZeroingString::from(wallet_pass);
-    let wallet = Wallet::open_wallet(&server_config.wallet_owner_url, &wallet_pass)?;
+    let wallet = HttpWallet::open_wallet(&server_config.wallet_owner_url, &wallet_pass)?;
 
-    let shutdown_signal = async move {
-        // Wait for the CTRL+C signal
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install CTRL+C signal handler");
-    };
-    server::listen(&server_config, &wallet, shutdown_signal)
+    // Create GrinNode
+    let node = HttpGrinNode::new(&server_config.grin_node_url, &None);
+    
+    let stop_state = Arc::new(StopState::new());
+
+    let stop_state_clone = stop_state.clone();
+    std::thread::spawn(move || {
+        let shutdown_signal = async move {
+            // Wait for the CTRL+C signal
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install CTRL+C signal handler");
+        };
+        futures::executor::block_on(shutdown_signal);
+        stop_state_clone.stop();
+    });
+
+    server::listen(&server_config, Arc::new(wallet), Arc::new(node), &stop_state)
 }

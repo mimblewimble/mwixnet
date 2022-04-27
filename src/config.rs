@@ -15,7 +15,8 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ServerConfig {
 	pub key: SecretKey,
-    pub addr: SocketAddr,
+	pub interval_s: u32,
+	pub addr: SocketAddr,
 	pub grin_node_url: SocketAddr,
 	pub wallet_owner_url: SocketAddr,
 }
@@ -34,7 +35,6 @@ impl EncryptedServerKey {
 		password: &ZeroingString,
 	) -> Result<EncryptedServerKey> {
 		let salt: [u8; 8] = thread_rng().gen();
-		let nonce: [u8; 12] = thread_rng().gen();
 		let password = password.as_bytes();
 		let mut key = [0; 32];
 		ring::pbkdf2::derive(
@@ -49,6 +49,7 @@ impl EncryptedServerKey {
 
 		let unbound_key = aead::UnboundKey::new(&aead::CHACHA20_POLY1305, &key).unwrap();
 		let sealing_key: aead::LessSafeKey = aead::LessSafeKey::new(unbound_key);
+		let nonce: [u8; 12] = thread_rng().gen();
 		let aad = aead::Aad::from(&[]);
 		let _ = sealing_key.seal_in_place_append_tag(
 			aead::Nonce::assume_unique_for_key(nonce),
@@ -106,7 +107,8 @@ struct RawConfig {
 	pub encrypted_key: String,
 	pub salt: String,
 	pub nonce: String,
-    pub addr: SocketAddr,
+	pub interval_s: u32,
+	pub addr: SocketAddr,
 	pub grin_node_url: SocketAddr,
 	pub wallet_owner_url: SocketAddr,
 }
@@ -119,6 +121,7 @@ pub fn write_config(config_path: &PathBuf, server_config: &ServerConfig,  passwo
 		encrypted_key: encrypted.encrypted_key,
 		salt: encrypted.salt,
 		nonce: encrypted.nonce,
+		interval_s: server_config.interval_s,
 		addr: server_config.addr,
 		grin_node_url: server_config.grin_node_url,
 		wallet_owner_url: server_config.wallet_owner_url,
@@ -146,6 +149,7 @@ pub fn load_config(config_path: &PathBuf, password: &ZeroingString) -> Result<Se
     
 	Ok(ServerConfig {
 		key: secret_key,
+		interval_s: raw_config.interval_s,
 		addr: raw_config.addr,
 		grin_node_url: raw_config.grin_node_url,
 		wallet_owner_url: raw_config.wallet_owner_url

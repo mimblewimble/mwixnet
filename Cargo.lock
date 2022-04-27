@@ -1572,7 +1572,7 @@ dependencies = [
 [[package]]
 name = "grin_wallet_api"
 version = "5.1.0-alpha.1"
-source = "git+https://github.com/mimblewimble/grin-wallet#c424a0ed10b5b2565d9dbb5c222544ddd22c3167"
+source = "git+https://github.com/mimblewimble/grin-wallet?branch=master#cecb084753bb4cd545c11e4802f4e2f4b11b9213"
 dependencies = [
  "base64 0.12.3",
  "chrono",
@@ -1596,7 +1596,7 @@ dependencies = [
 [[package]]
 name = "grin_wallet_config"
 version = "5.1.0-alpha.1"
-source = "git+https://github.com/mimblewimble/grin-wallet#c424a0ed10b5b2565d9dbb5c222544ddd22c3167"
+source = "git+https://github.com/mimblewimble/grin-wallet?branch=master#cecb084753bb4cd545c11e4802f4e2f4b11b9213"
 dependencies = [
  "dirs",
  "grin_wallet_util",
@@ -1609,7 +1609,7 @@ dependencies = [
 [[package]]
 name = "grin_wallet_impls"
 version = "5.1.0-alpha.1"
-source = "git+https://github.com/mimblewimble/grin-wallet#c424a0ed10b5b2565d9dbb5c222544ddd22c3167"
+source = "git+https://github.com/mimblewimble/grin-wallet?branch=master#cecb084753bb4cd545c11e4802f4e2f4b11b9213"
 dependencies = [
  "base64 0.12.3",
  "blake2-rfc",
@@ -1643,7 +1643,7 @@ dependencies = [
 [[package]]
 name = "grin_wallet_libwallet"
 version = "5.1.0-alpha.1"
-source = "git+https://github.com/mimblewimble/grin-wallet#c424a0ed10b5b2565d9dbb5c222544ddd22c3167"
+source = "git+https://github.com/mimblewimble/grin-wallet?branch=master#cecb084753bb4cd545c11e4802f4e2f4b11b9213"
 dependencies = [
  "age",
  "base64 0.9.3",
@@ -1676,7 +1676,7 @@ dependencies = [
 [[package]]
 name = "grin_wallet_util"
 version = "5.1.0-alpha.1"
-source = "git+https://github.com/mimblewimble/grin-wallet#c424a0ed10b5b2565d9dbb5c222544ddd22c3167"
+source = "git+https://github.com/mimblewimble/grin-wallet?branch=master#cecb084753bb4cd545c11e4802f4e2f4b11b9213"
 dependencies = [
  "data-encoding",
  "ed25519-dalek",
