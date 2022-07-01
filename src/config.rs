@@ -11,7 +11,7 @@ use std::io::prelude::*;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-// The decrypted server config to be passed around and used by the rest of the mwixnet code
+/// The decrypted server config to be passed around and used by the rest of the mwixnet code
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ServerConfig {
 	/// private key used by the server to decrypt onion packets
@@ -38,7 +38,7 @@ struct EncryptedServerKey {
 impl EncryptedServerKey {
 	/// Generates a random salt for pbkdf2 key derivation and a random nonce for aead sealing.
 	/// Then derives an encryption key from the password and salt. Finally, it encrypts and seals
-	/// the server key with chacha20-poly1305 using the derived key and random nonce. 
+	/// the server key with chacha20-poly1305 using the derived key and random nonce.
 	pub fn from_secret_key(
 		server_key: &SecretKey,
 		password: &ZeroingString,
@@ -46,8 +46,8 @@ impl EncryptedServerKey {
 		let salt: [u8; 8] = thread_rng().gen();
 		let password = password.as_bytes();
 		let mut key = [0; 32];
-		ring::pbkdf2::derive(
-			ring::pbkdf2::PBKDF2_HMAC_SHA512,
+		pbkdf2::derive(
+			pbkdf2::PBKDF2_HMAC_SHA512,
 			NonZeroU32::new(100).unwrap(),
 			&salt,
 			password,
@@ -60,11 +60,18 @@ impl EncryptedServerKey {
 		let sealing_key: aead::LessSafeKey = aead::LessSafeKey::new(unbound_key);
 		let nonce: [u8; 12] = thread_rng().gen();
 		let aad = aead::Aad::from(&[]);
-		let _ = sealing_key.seal_in_place_append_tag(
-			aead::Nonce::assume_unique_for_key(nonce),
-			aad,
-			&mut enc_bytes,
-		).map_err(|_| error::ErrorKind::SaveConfigError)?;
+		let _ = sealing_key
+			.seal_in_place_append_tag(
+				aead::Nonce::assume_unique_for_key(nonce),
+				aad,
+				&mut enc_bytes,
+			)
+			.map_err(|e| {
+				error::ErrorKind::SaveConfigError(format!(
+					"Failure while encrypting server key: {}",
+					e
+				))
+			})?;
 
 		Ok(EncryptedServerKey {
 			encrypted_key: enc_bytes.to_hex(),
@@ -73,17 +80,18 @@ impl EncryptedServerKey {
 		})
 	}
 
+	/// Decrypt the server secret key using the provided password.
 	pub fn decrypt(&self, password: &str) -> Result<SecretKey> {
 		let mut encrypted_seed = grin_util::from_hex(&self.encrypted_key.clone())
-        	.map_err(|_| error::ErrorKind::LoadConfigError)?;
+			.map_err(|_| error::ErrorKind::LoadConfigError("Seed not valid hex".to_string()))?;
 		let salt = grin_util::from_hex(&self.salt.clone())
-        	.map_err(|_| error::ErrorKind::LoadConfigError)?;
+			.map_err(|_| error::ErrorKind::LoadConfigError("Salt not valid hex".to_string()))?;
 		let nonce = grin_util::from_hex(&self.nonce.clone())
-        	.map_err(|_| error::ErrorKind::LoadConfigError)?;
+			.map_err(|_| error::ErrorKind::LoadConfigError("Nonce not valid hex".to_string()))?;
 		let password = password.as_bytes();
 		let mut key = [0; 32];
 		pbkdf2::derive(
-			ring::pbkdf2::PBKDF2_HMAC_SHA512,
+			pbkdf2::PBKDF2_HMAC_SHA512,
 			NonZeroU32::new(100).unwrap(),
 			&salt,
 			password,
@@ -95,18 +103,25 @@ impl EncryptedServerKey {
 		let unbound_key = aead::UnboundKey::new(&aead::CHACHA20_POLY1305, &key).unwrap();
 		let opening_key: aead::LessSafeKey = aead::LessSafeKey::new(unbound_key);
 		let aad = aead::Aad::from(&[]);
-		let _ = opening_key.open_in_place(
-			aead::Nonce::assume_unique_for_key(n),
-			aad,
-			&mut encrypted_seed,
-		).map_err(|_| error::ErrorKind::LoadConfigError)?;
+		let _ = opening_key
+			.open_in_place(
+				aead::Nonce::assume_unique_for_key(n),
+				aad,
+				&mut encrypted_seed,
+			)
+			.map_err(|e| {
+				error::ErrorKind::LoadConfigError(format!("Error decrypting seed: {}", e))
+			})?;
 
 		for _ in 0..aead::AES_256_GCM.tag_len() {
 			encrypted_seed.pop();
 		}
 
 		let secp = secp256k1zkp::Secp256k1::new();
-		Ok(SecretKey::from_slice(&secp, &encrypted_seed).unwrap())
+		let decrypted = SecretKey::from_slice(&secp, &encrypted_seed).map_err(|_| {
+			error::ErrorKind::LoadConfigError("Decrypted key not valid".to_string())
+		})?;
+		Ok(decrypted)
 	}
 }
 
@@ -123,10 +138,14 @@ struct RawConfig {
 }
 
 /// Writes the server config to the config_path given, encrypting the server_key first.
-pub fn write_config(config_path: &PathBuf, server_config: &ServerConfig,  password: &ZeroingString) -> Result<()> {
+pub fn write_config(
+	config_path: &PathBuf,
+	server_config: &ServerConfig,
+	password: &ZeroingString,
+) -> Result<()> {
 	let encrypted = EncryptedServerKey::from_secret_key(&server_config.key, &password)?;
 
-	let raw_config = RawConfig{
+	let raw_config = RawConfig {
 		encrypted_key: encrypted.encrypted_key,
 		salt: encrypted.salt,
 		nonce: encrypted.nonce,
@@ -135,33 +154,37 @@ pub fn write_config(config_path: &PathBuf, server_config: &ServerConfig,  passwo
 		grin_node_url: server_config.grin_node_url,
 		wallet_owner_url: server_config.wallet_owner_url,
 	};
-	let encoded: String = toml::to_string(&raw_config).map_err(|_| error::ErrorKind::SaveConfigError)?;
-	
+	let encoded: String = toml::to_string(&raw_config).map_err(|e| {
+		error::ErrorKind::SaveConfigError(format!("Error while encoding config as toml: {}", e))
+	})?;
+
 	let mut file = File::create(config_path)?;
-	file.write_all(encoded.as_bytes()).map_err(|_| error::ErrorKind::SaveConfigError)?;
+	file.write_all(encoded.as_bytes()).map_err(|e| {
+		error::ErrorKind::SaveConfigError(format!("Error while writing config to file: {}", e))
+	})?;
 
 	Ok(())
 }
 
 /// Reads the server config from the config_path given and decrypts it with the provided password.
 pub fn load_config(config_path: &PathBuf, password: &ZeroingString) -> Result<ServerConfig> {
-    let contents = std::fs::read_to_string(config_path)?;
-    let raw_config: RawConfig = toml::from_str(&contents)
-        .map_err(|_| error::ErrorKind::LoadConfigError)?;
-	
-    let encrypted_key = EncryptedServerKey{
+	let contents = std::fs::read_to_string(config_path)?;
+	let raw_config: RawConfig =
+		toml::from_str(&contents).map_err(|e| error::ErrorKind::LoadConfigError(e.to_string()))?;
+
+	let encrypted_key = EncryptedServerKey {
 		encrypted_key: raw_config.encrypted_key,
 		salt: raw_config.salt,
-		nonce: raw_config.nonce
+		nonce: raw_config.nonce,
 	};
 	let secret_key = encrypted_key.decrypt(&password)?;
-    
+
 	Ok(ServerConfig {
 		key: secret_key,
 		interval_s: raw_config.interval_s,
 		addr: raw_config.addr,
 		grin_node_url: raw_config.grin_node_url,
-		wallet_owner_url: raw_config.wallet_owner_url
+		wallet_owner_url: raw_config.wallet_owner_url,
 	})
 }
 

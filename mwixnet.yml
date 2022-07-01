@@ -8,12 +8,6 @@ args:
       short: c
       long: config_file
       takes_value: true
-  - pass:
-      help: Password to encrypt/decrypt the server key in the configuration file
-      short: p
-      long: pass
-      takes_value: true
-      required: true
   - grin_node_url:
       help: Api address of running GRIN node on which to check inputs and post transactions
       short: n
