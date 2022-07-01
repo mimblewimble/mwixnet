@@ -168,7 +168,12 @@ pub fn write_config(
 
 /// Reads the server config from the config_path given and decrypts it with the provided password.
 pub fn load_config(config_path: &PathBuf, password: &ZeroingString) -> Result<ServerConfig> {
-	let contents = std::fs::read_to_string(config_path)?;
+	let contents = std::fs::read_to_string(config_path).map_err(|e| {
+		error::ErrorKind::LoadConfigError(format!(
+			"Unable to read server config. Perform init-config or pass in config path.\nError: {}",
+			e
+		))
+	})?;
 	let raw_config: RawConfig =
 		toml::from_str(&contents).map_err(|e| error::ErrorKind::LoadConfigError(e.to_string()))?;
 
