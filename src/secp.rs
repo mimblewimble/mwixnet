@@ -116,15 +116,14 @@ pub mod comsig_serde {
 	}
 
 	/// Creates a ComSignature from a hex string
-	pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<ComSignature, D::Error>
+	pub fn deserialize<'de, D>(deserializer: D) -> Result<ComSignature, D::Error>
 	where
 		D: serde::Deserializer<'de>,
 	{
 		use serde::de::Error;
 		let bytes = String::deserialize(deserializer)
 			.and_then(|string| grin_util::from_hex(&string).map_err(Error::custom))?;
-		let sig: ComSignature =
-			grin_core::ser::deserialize_default(&mut &bytes[..]).map_err(Error::custom)?;
+		let sig: ComSignature = ser::deserialize_default(&mut &bytes[..]).map_err(Error::custom)?;
 		Ok(sig)
 	}
 }

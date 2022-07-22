@@ -85,6 +85,7 @@ pub fn assemble_tx(
 #[derive(Clone)]
 pub struct HttpWallet {
 	wallet_owner_url: SocketAddr,
+	wallet_owner_secret: Option<String>,
 	shared_key: SecretKey,
 	token: Token,
 }
@@ -104,6 +105,7 @@ impl HttpWallet {
 	/// Calls the 'open_wallet' using the RPC API.
 	pub fn open_wallet(
 		wallet_owner_url: &SocketAddr,
+		wallet_owner_secret: &Option<String>,
 		wallet_pass: &ZeroingString,
 	) -> Result<HttpWallet> {
 		println!("Opening wallet at {}", wallet_owner_url);
@@ -115,6 +117,7 @@ impl HttpWallet {
 		});
 		let token: Token = HttpWallet::send_enc_request(
 			&wallet_owner_url,
+			&wallet_owner_secret,
 			"open_wallet",
 			&open_wallet_params,
 			&shared_key,
@@ -123,6 +126,7 @@ impl HttpWallet {
 
 		Ok(HttpWallet {
 			wallet_owner_url: wallet_owner_url.clone(),
+			wallet_owner_secret: wallet_owner_secret.clone(),
 			shared_key: shared_key.clone(),
 			token: token.clone(),
 		})
@@ -152,6 +156,7 @@ impl HttpWallet {
 
 	fn send_enc_request<D: serde::de::DeserializeOwned>(
 		wallet_owner_url: &SocketAddr,
+		wallet_owner_secret: &Option<String>,
 		method: &str,
 		params: &serde_json::Value,
 		shared_key: &SecretKey,
@@ -164,8 +169,11 @@ impl HttpWallet {
 			"jsonrpc": "2.0",
 		});
 		let enc_req = EncryptedRequest::from_json(&JsonId::IntId(1), &req, &shared_key)?;
-		let res =
-			client::post::<EncryptedRequest, EncryptedResponse>(url.as_str(), None, &enc_req)?;
+		let res = client::post::<EncryptedRequest, EncryptedResponse>(
+			url.as_str(),
+			wallet_owner_secret.clone(),
+			&enc_req,
+		)?;
 		let decrypted = res.decrypt(&shared_key)?;
 		let response: Response = serde_json::from_value(decrypted.clone())?;
 		let parsed = serde_json::from_value(response.result.unwrap().get("Ok").unwrap().clone())?;
@@ -205,6 +213,7 @@ impl Wallet for HttpWallet {
 		});
 		let output: OutputWithBlind = HttpWallet::send_enc_request(
 			&self.wallet_owner_url,
+			&self.wallet_owner_secret,
 			"build_output",
 			&req_json,
 			&self.shared_key,

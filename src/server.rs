@@ -319,7 +319,9 @@ mod tests {
 			interval_s: 1,
 			addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
 			grin_node_url: "127.0.0.1:3413".parse()?,
+			grin_node_secret_path: None,
 			wallet_owner_url: "127.0.0.1:3420".parse()?,
+			wallet_owner_secret_path: None,
 		};
 
 		let threaded_rt = runtime::Runtime::new()?;

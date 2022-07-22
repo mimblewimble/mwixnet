@@ -2,7 +2,7 @@ use crate::error::{self, Result};
 use crate::secp::SecretKey;
 
 use core::num::NonZeroU32;
-use grin_util::{ToHex, ZeroingString};
+use grin_util::{file, ToHex, ZeroingString};
 use rand::{thread_rng, Rng};
 use ring::{aead, pbkdf2};
 use serde_derive::{Deserialize, Serialize};
@@ -10,6 +10,11 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+
+const GRIN_HOME: &str = ".grin";
+const CHAIN_NAME: &str = "main";
+const NODE_API_SECRET_FILE_NAME: &str = ".api_secret";
+const WALLET_OWNER_API_SECRET_FILE_NAME: &str = ".owner_api_secret";
 
 /// The decrypted server config to be passed around and used by the rest of the mwixnet code
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -22,8 +27,22 @@ pub struct ServerConfig {
 	pub addr: SocketAddr,
 	/// foreign api address of the grin node
 	pub grin_node_url: SocketAddr,
+	/// path to file containing api secret for the grin node
+	pub grin_node_secret_path: Option<String>,
 	/// owner api address of the grin wallet
 	pub wallet_owner_url: SocketAddr,
+	/// path to file containing secret for the grin wallet's owner api
+	pub wallet_owner_secret_path: Option<String>,
+}
+
+impl ServerConfig {
+	pub fn node_api_secret(&self) -> Option<String> {
+		file::get_first_line(self.grin_node_secret_path.clone())
+	}
+
+	pub fn wallet_owner_api_secret(&self) -> Option<String> {
+		file::get_first_line(self.wallet_owner_secret_path.clone())
+	}
 }
 
 /// Encrypted server key, for storing on disk and decrypting with a password.
@@ -134,7 +153,9 @@ struct RawConfig {
 	interval_s: u32,
 	addr: SocketAddr,
 	grin_node_url: SocketAddr,
+	grin_node_secret_path: Option<String>,
 	wallet_owner_url: SocketAddr,
+	wallet_owner_secret_path: Option<String>,
 }
 
 /// Writes the server config to the config_path given, encrypting the server_key first.
@@ -152,7 +173,9 @@ pub fn write_config(
 		interval_s: server_config.interval_s,
 		addr: server_config.addr,
 		grin_node_url: server_config.grin_node_url,
+		grin_node_secret_path: server_config.grin_node_secret_path.clone(),
 		wallet_owner_url: server_config.wallet_owner_url,
+		wallet_owner_secret_path: server_config.wallet_owner_secret_path.clone(),
 	};
 	let encoded: String = toml::to_string(&raw_config).map_err(|e| {
 		error::ErrorKind::SaveConfigError(format!("Error while encoding config as toml: {}", e))
@@ -189,8 +212,32 @@ pub fn load_config(config_path: &PathBuf, password: &ZeroingString) -> Result<Se
 		interval_s: raw_config.interval_s,
 		addr: raw_config.addr,
 		grin_node_url: raw_config.grin_node_url,
+		grin_node_secret_path: raw_config.grin_node_secret_path,
 		wallet_owner_url: raw_config.wallet_owner_url,
+		wallet_owner_secret_path: raw_config.wallet_owner_secret_path,
 	})
+}
+
+pub fn get_grin_path() -> PathBuf {
+	let mut grin_path = match dirs::home_dir() {
+		Some(p) => p,
+		None => PathBuf::new(),
+	};
+	grin_path.push(GRIN_HOME);
+	grin_path.push(CHAIN_NAME);
+	grin_path
+}
+
+pub fn node_secret_path() -> PathBuf {
+	let mut path = get_grin_path();
+	path.push(NODE_API_SECRET_FILE_NAME);
+	path
+}
+
+pub fn wallet_owner_secret_path() -> PathBuf {
+	let mut path = get_grin_path();
+	path.push(WALLET_OWNER_API_SECRET_FILE_NAME);
+	path
 }
 
 #[cfg(test)]
