@@ -15,10 +15,14 @@ use std::fmt;
 type HmacSha256 = Hmac<Sha256>;
 type RawBytes = Vec<u8>;
 
+/// A data packet with layers of encryption
 #[derive(Clone, Debug, PartialEq)]
 pub struct Onion {
+	/// The onion originator's portion of the shared secret
 	pub ephemeral_pubkey: PublicKey,
+	/// The pedersen commitment before adjusting the excess and subtracting the fee
 	pub commit: Commitment,
+	/// The encrypted payloads which represent the layers of the onion
 	pub enc_payloads: Vec<RawBytes>,
 }
 

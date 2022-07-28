@@ -10,9 +10,6 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 #[macro_use]
-extern crate lazy_static;
-
-#[macro_use]
 extern crate clap;
 
 mod config;
@@ -141,12 +138,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	});
 
 	// Start the mwixnet server
-	server::listen(
-		&server_config,
-		Arc::new(wallet),
-		Arc::new(node),
-		&stop_state,
-	)
+	server::listen(server_config, Arc::new(wallet), Arc::new(node), stop_state)
 }
 
 async fn build_signals_fut() {
