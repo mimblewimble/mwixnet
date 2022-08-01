@@ -201,7 +201,7 @@ mod tests {
 	#[test]
 	fn swap_success() -> Result<(), Box<dyn std::error::Error>> {
 		let commitment = secp::commit(1234, &secp::random_secret())?;
-		let onion = test_util::create_onion(&commitment, &secp::random_secret(), &vec![])?;
+		let onion = test_util::create_onion(&commitment, &vec![])?;
 		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
 		let swap = SwapReq {
 			onion: onion.clone(),
@@ -241,7 +241,7 @@ mod tests {
 	#[test]
 	fn swap_utxo_missing() -> Result<(), Box<dyn std::error::Error>> {
 		let commitment = secp::commit(1234, &secp::random_secret())?;
-		let onion = test_util::create_onion(&commitment, &secp::random_secret(), &vec![])?;
+		let onion = test_util::create_onion(&commitment, &vec![])?;
 		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
 		let swap = SwapReq {
 			onion: onion.clone(),

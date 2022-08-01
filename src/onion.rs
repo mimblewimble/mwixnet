@@ -214,20 +214,19 @@ pub mod test_util {
 	use crate::secp::{Commitment, PublicKey, Secp256k1, SecretKey, SharedSecret};
 	use crate::types::Payload;
 
+	use crate::secp;
 	use chacha20::cipher::StreamCipher;
 
+	#[derive(Clone)]
 	pub struct Hop {
 		pub pubkey: PublicKey,
 		pub payload: Payload,
 	}
 
 	/// Create an Onion for the Commitment, encrypting the payload for each hop
-	pub fn create_onion(
-		commitment: &Commitment,
-		session_key: &SecretKey,
-		hops: &Vec<Hop>,
-	) -> Result<Onion> {
+	pub fn create_onion(commitment: &Commitment, hops: &Vec<Hop>) -> Result<Onion> {
 		let secp = Secp256k1::new();
+		let session_key = secp::random_secret();
 		let mut ephemeral_key = session_key.clone();
 
 		let mut shared_secrets: Vec<SharedSecret> = Vec::new();
@@ -251,7 +250,7 @@ pub mod test_util {
 		}
 
 		let onion = Onion {
-			ephemeral_pubkey: PublicKey::from_secret_key(&secp, session_key)?,
+			ephemeral_pubkey: PublicKey::from_secret_key(&secp, &session_key)?,
 			commit: commitment.clone(),
 			enc_payloads,
 		};
@@ -287,9 +286,7 @@ pub mod tests {
 		let blind = secp::random_secret();
 		let commitment = secp::commit(in_value, &blind).unwrap();
 
-		let session_key = secp::random_secret();
 		let mut hops: Vec<Hop> = Vec::new();
-
 		let mut keys: Vec<secp::SecretKey> = Vec::new();
 		let mut final_commit = secp::commit(out_value, &blind).unwrap();
 		let mut final_blind = blind.clone();
@@ -327,7 +324,7 @@ pub mod tests {
 			});
 		}
 
-		let mut onion_packet = test_util::create_onion(&commitment, &session_key, &hops).unwrap();
+		let mut onion_packet = test_util::create_onion(&commitment, &hops).unwrap();
 
 		let mut payload = Payload {
 			excess: secp::random_secret(),
