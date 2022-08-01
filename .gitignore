@@ -5,3 +5,5 @@ target
 *.iml
 .idea/
 .vscode/
+
+mwixnet-config.toml
