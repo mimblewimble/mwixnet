@@ -16,6 +16,7 @@ mod config;
 mod error;
 mod node;
 mod onion;
+mod rpc;
 mod secp;
 mod server;
 mod types;
@@ -137,8 +138,8 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		stop_state_clone.stop();
 	});
 
-	// Start the mwixnet server
-	server::listen(server_config, Arc::new(wallet), Arc::new(node), stop_state)
+	// Start the mwixnet JSON-RPC HTTP server
+	rpc::listen(server_config, Arc::new(wallet), Arc::new(node), stop_state)
 }
 
 async fn build_signals_fut() {

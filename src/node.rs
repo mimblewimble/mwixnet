@@ -9,9 +9,8 @@ use grin_core::core::{Input, OutputFeatures, Transaction};
 use grin_util::ToHex;
 
 use serde_json::json;
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 pub trait GrinNode: Send + Sync {
 	/// Retrieves the unspent output with a matching commitment
@@ -147,62 +146,74 @@ impl GrinNode for HttpGrinNode {
 	}
 }
 
-/// Implementation of 'GrinNode' trait that mocks a grin node instance.
-/// Use only for testing purposes.
-pub struct MockGrinNode {
-	utxos: HashMap<Commitment, OutputPrintable>,
-	txns_posted: RwLock<Vec<Transaction>>,
-}
+#[cfg(test)]
+pub mod mock {
+	use super::GrinNode;
+	use crate::error::Result;
+	use crate::secp::Commitment;
 
-impl MockGrinNode {
-	pub fn new() -> MockGrinNode {
-		MockGrinNode {
-			utxos: HashMap::new(),
-			txns_posted: RwLock::new(Vec::new()),
+	use grin_api::{OutputPrintable, OutputType};
+	use grin_core::core::Transaction;
+	use std::collections::HashMap;
+	use std::sync::RwLock;
+
+	/// Implementation of 'GrinNode' trait that mocks a grin node instance.
+	/// Use only for testing purposes.
+	pub struct MockGrinNode {
+		utxos: HashMap<Commitment, OutputPrintable>,
+		txns_posted: RwLock<Vec<Transaction>>,
+	}
+
+	impl MockGrinNode {
+		pub fn new() -> MockGrinNode {
+			MockGrinNode {
+				utxos: HashMap::new(),
+				txns_posted: RwLock::new(Vec::new()),
+			}
+		}
+
+		pub fn add_utxo(&mut self, output_commit: &Commitment, utxo: &OutputPrintable) {
+			self.utxos.insert(output_commit.clone(), utxo.clone());
+		}
+
+		pub fn add_default_utxo(&mut self, output_commit: &Commitment) {
+			let utxo = OutputPrintable {
+				output_type: OutputType::Transaction,
+				commit: output_commit.to_owned(),
+				spent: false,
+				proof: None,
+				proof_hash: String::from(""),
+				block_height: None,
+				merkle_proof: None,
+				mmr_index: 0,
+			};
+
+			self.add_utxo(&output_commit, &utxo);
+		}
+
+		pub fn get_posted_txns(&self) -> Vec<Transaction> {
+			let read = self.txns_posted.read().unwrap();
+			read.clone()
 		}
 	}
 
-	pub fn add_utxo(&mut self, output_commit: &Commitment, utxo: &OutputPrintable) {
-		self.utxos.insert(output_commit.clone(), utxo.clone());
-	}
+	impl GrinNode for MockGrinNode {
+		fn get_utxo(&self, output_commit: &Commitment) -> Result<Option<OutputPrintable>> {
+			if let Some(utxo) = self.utxos.get(&output_commit) {
+				return Ok(Some(utxo.clone()));
+			}
 
-	pub fn add_default_utxo(&mut self, output_commit: &Commitment) {
-		let utxo = OutputPrintable {
-			output_type: OutputType::Transaction,
-			commit: output_commit.to_owned(),
-			spent: false,
-			proof: None,
-			proof_hash: String::from(""),
-			block_height: None,
-			merkle_proof: None,
-			mmr_index: 0,
-		};
-
-		self.add_utxo(&output_commit, &utxo);
-	}
-
-	pub fn get_posted_txns(&self) -> Vec<Transaction> {
-		let read = self.txns_posted.read().unwrap();
-		read.clone()
-	}
-}
-
-impl GrinNode for MockGrinNode {
-	fn get_utxo(&self, output_commit: &Commitment) -> Result<Option<OutputPrintable>> {
-		if let Some(utxo) = self.utxos.get(&output_commit) {
-			return Ok(Some(utxo.clone()));
+			Ok(None)
 		}
 
-		Ok(None)
-	}
+		fn get_chain_height(&self) -> Result<u64> {
+			Ok(100)
+		}
 
-	fn get_chain_height(&self) -> Result<u64> {
-		Ok(100)
-	}
-
-	fn post_tx(&self, tx: &Transaction) -> Result<()> {
-		let mut write = self.txns_posted.write().unwrap();
-		write.push(tx.clone());
-		Ok(())
+		fn post_tx(&self, tx: &Transaction) -> Result<()> {
+			let mut write = self.txns_posted.write().unwrap();
+			write.push(tx.clone());
+			Ok(())
+		}
 	}
 }

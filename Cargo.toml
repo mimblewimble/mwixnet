@@ -29,6 +29,7 @@ serde = { version = "1", features= ["derive"]}
 serde_derive = "1"
 serde_json = "1"
 sha2 = "0.10.0"
+thiserror = "1.0.31"
 tokio = { version = "1", features = ["full"] }
 toml = "0.5"
 grin_secp256k1zkp = { version = "0.7.11", features = ["bullet-proof-sizing"]}

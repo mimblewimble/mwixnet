@@ -16,7 +16,7 @@ type HmacSha256 = Hmac<Sha256>;
 type RawBytes = Vec<u8>;
 
 /// A data packet with layers of encryption
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Onion {
 	/// The onion originator's portion of the shared secret
 	pub ephemeral_pubkey: PublicKey,
@@ -256,6 +256,16 @@ pub mod test_util {
 			enc_payloads,
 		};
 		Ok(onion)
+	}
+
+	/// Calculates the expected next ephemeral pubkey after peeling a layer off of the Onion.
+	pub fn next_ephemeral_pubkey(onion: &Onion, server_key: &SecretKey) -> Result<PublicKey> {
+		let secp = Secp256k1::new();
+		let mut ephemeral_pubkey = onion.ephemeral_pubkey.clone();
+		let shared_secret = SharedSecret::new(&secp, &ephemeral_pubkey, &server_key);
+		let blinding_factor = super::calc_blinding_factor(&shared_secret, &ephemeral_pubkey)?;
+		ephemeral_pubkey.mul_assign(&secp, &blinding_factor)?;
+		Ok(ephemeral_pubkey)
 	}
 }
 

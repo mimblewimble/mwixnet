@@ -1,11 +1,10 @@
 use crate::error::{ErrorKind, Result};
-use crate::secp::{self};
+use crate::secp;
 
 use grin_api::client;
 use grin_api::json_rpc::{build_request, Request, Response};
 use grin_core::core::{
-	FeeFields, Input, Inputs, KernelFeatures, Output, OutputFeatures, Transaction, TransactionBody,
-	TxKernel,
+	FeeFields, Input, Inputs, KernelFeatures, Output, Transaction, TransactionBody, TxKernel,
 };
 use grin_core::libtx::secp_ser;
 use grin_keychain::BlindingFactor;
@@ -222,25 +221,36 @@ impl Wallet for HttpWallet {
 	}
 }
 
-/// HTTP (JSONRPC) implementation of the 'Wallet' trait.
-#[derive(Clone)]
-pub struct MockWallet {}
+#[cfg(test)]
+pub mod mock {
+	use super::Wallet;
+	use crate::error::Result;
+	use crate::secp;
 
-impl Wallet for MockWallet {
-	/// Builds an 'Output' for the wallet using the 'build_output' RPC API.
-	fn build_output(&self, amount: u64) -> Result<(BlindingFactor, Output)> {
-		let secp = Secp256k1::new();
-		let blind = secp::random_secret();
-		let commit = secp::commit(amount, &blind)?;
-		let proof = secp.bullet_proof(
-			amount,
-			blind.clone(),
-			secp::random_secret(),
-			secp::random_secret(),
-			None,
-			None,
-		);
-		let output = Output::new(OutputFeatures::Plain, commit.clone(), proof);
-		Ok((BlindingFactor::from_secret_key(blind), output))
+	use grin_core::core::{Output, OutputFeatures};
+	use grin_keychain::BlindingFactor;
+	use secp256k1zkp::Secp256k1;
+
+	/// HTTP (JSONRPC) implementation of the 'Wallet' trait.
+	#[derive(Clone)]
+	pub struct MockWallet {}
+
+	impl Wallet for MockWallet {
+		/// Builds an 'Output' for the wallet using the 'build_output' RPC API.
+		fn build_output(&self, amount: u64) -> Result<(BlindingFactor, Output)> {
+			let secp = Secp256k1::new();
+			let blind = secp::random_secret();
+			let commit = secp::commit(amount, &blind)?;
+			let proof = secp.bullet_proof(
+				amount,
+				blind.clone(),
+				secp::random_secret(),
+				secp::random_secret(),
+				None,
+				None,
+			);
+			let output = Output::new(OutputFeatures::Plain, commit.clone(), proof);
+			Ok((BlindingFactor::from_secret_key(blind), output))
+		}
 	}
 }

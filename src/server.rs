@@ -6,16 +6,11 @@ use crate::wallet::{self, Wallet};
 
 use grin_core::core::{Input, Output, OutputFeatures, TransactionBody};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
-use grin_util::StopState;
 use itertools::Itertools;
-use jsonrpc_core::{Result, Value};
-use jsonrpc_derive::rpc;
-use jsonrpc_http_server::jsonrpc_core::*;
-use jsonrpc_http_server::*;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::result::Result;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Submission {
@@ -33,57 +28,54 @@ struct Submission {
 	onion: Onion,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct SwapReq {
-	onion: Onion,
-	#[serde(with = "secp::comsig_serde")]
-	comsig: ComSignature,
+/// Swap error types
+#[derive(Clone, Error, Debug, PartialEq)]
+pub enum SwapError {
+	#[error("Invalid number of payloads provided (expected {expected:?}, found {found:?})")]
+	InvalidPayloadLength { expected: usize, found: usize },
+	#[error("Commitment Signature is invalid")]
+	InvalidComSignature,
+	#[error("Rangeproof is missing or invalid")]
+	InvalidRangeproof,
+	#[error("Output {commit:?} does not exist, or is already spent.")]
+	CoinNotFound { commit: Commitment },
+	#[error("Output {commit:?} is already in the swap list.")]
+	AlreadySwapped { commit: Commitment },
+	#[error("Failed to peel onion layer: {0}")]
+	PeelOnionFailure(String),
+	#[error("Fee too low (expected >= {minimum_fee:?}, actual {actual_fee:?})")]
+	FeeTooLow { minimum_fee: u64, actual_fee: u64 },
+	#[error("{0}")]
+	UnknownError(String),
 }
 
-#[rpc(server)]
-pub trait RPCServer {
-	#[rpc(name = "swap")]
-	fn swap(&self, swap: SwapReq) -> Result<Value>;
+pub trait Server: Send + Sync {
+	fn swap(&self, onion: &Onion, comsig: &ComSignature) -> Result<(), SwapError>;
 
-	// milestone 3: Used by mwixnet coinswap servers to communicate with each other
-	// fn derive_outputs(&self, entries: Vec<Onion>) -> Result<Value>;
-	// fn derive_kernel(&self, tx: Tx) -> Result<Value>;
+	fn execute_round(&self) -> crate::error::Result<()>;
 }
 
 #[derive(Clone)]
-struct Server {
+pub struct ServerImpl {
 	server_config: ServerConfig,
 	wallet: Arc<dyn Wallet>,
 	node: Arc<dyn GrinNode>,
 	submissions: Arc<Mutex<HashMap<Commitment, Submission>>>,
 }
 
-impl Server {
-	fn new(server_config: ServerConfig, wallet: Arc<dyn Wallet>, node: Arc<dyn GrinNode>) -> Self {
-		Server {
+impl ServerImpl {
+	/// Create a new MWixnet server
+	pub fn new(
+		server_config: ServerConfig,
+		wallet: Arc<dyn Wallet>,
+		node: Arc<dyn GrinNode>,
+	) -> Self {
+		ServerImpl {
 			server_config,
 			wallet,
 			node,
 			submissions: Arc::new(Mutex::new(HashMap::new())),
 		}
-	}
-
-	/// Spin up an instance of the JSON-RPC HTTP server.
-	fn start_rpc(&self) -> jsonrpc_http_server::Server {
-		let mut io = IoHandler::new();
-		io.extend_with(Server::to_delegate(self.clone()));
-
-		ServerBuilder::new(io)
-			.cors(DomainsValidation::Disabled)
-			.request_middleware(|request: hyper::Request<hyper::Body>| {
-				if request.uri() == "/v1" {
-					request.into()
-				} else {
-					jsonrpc_http_server::Response::bad_request("Only v1 supported").into()
-				}
-			})
-			.start_http(&self.server_config.addr)
-			.expect("Unable to start RPC server")
 	}
 
 	/// The fee base to use. For now, just using the default.
@@ -95,6 +87,83 @@ impl Server {
 	/// Requires enough fee for the mwixnet server's kernel, 1 input and its output to swap.
 	fn get_minimum_swap_fee(&self) -> u64 {
 		TransactionBody::weight_by_iok(1, 1, 1) * self.get_fee_base()
+	}
+}
+
+impl Server for ServerImpl {
+	/// Submit a new output to be swapped.
+	fn swap(&self, onion: &Onion, comsig: &ComSignature) -> Result<(), SwapError> {
+		// milestone 3: check that enc_payloads length matches number of configured servers
+		if onion.enc_payloads.len() != 1 {
+			return Err(SwapError::InvalidPayloadLength {
+				expected: 1,
+				found: onion.enc_payloads.len(),
+			});
+		}
+
+		// Verify commitment signature to ensure caller owns the output
+		let serialized_onion = onion
+			.serialize()
+			.map_err(|e| SwapError::UnknownError(e.to_string()))?;
+		let _ = comsig
+			.verify(&onion.commit, &serialized_onion)
+			.map_err(|_| SwapError::InvalidComSignature)?;
+
+		// Verify that commitment is unspent
+		let input = node::build_input(&self.node, &onion.commit)
+			.map_err(|e| SwapError::UnknownError(e.to_string()))?;
+		let input = input.ok_or(SwapError::CoinNotFound {
+			commit: onion.commit.clone(),
+		})?;
+
+		let peeled = onion
+			.peel_layer(&self.server_config.key)
+			.map_err(|e| SwapError::PeelOnionFailure(e.message()))?;
+
+		// Verify the fee meets the minimum
+		let fee: u64 = peeled.0.fee.into();
+		if fee < self.get_minimum_swap_fee() {
+			return Err(SwapError::FeeTooLow {
+				minimum_fee: self.get_minimum_swap_fee(),
+				actual_fee: fee,
+			});
+		}
+
+		// Calculate final output commitment
+		let output_commit = secp::add_excess(&onion.commit, &peeled.0.excess)
+			.map_err(|e| SwapError::UnknownError(e.to_string()))?;
+		let output_commit = secp::sub_value(&output_commit, fee)
+			.map_err(|e| SwapError::UnknownError(e.to_string()))?;
+
+		// Verify the bullet proof and build the final output
+		if let Some(r) = peeled.0.rangeproof {
+			let secp = Secp256k1::with_caps(secp256k1zkp::ContextFlag::Commit);
+			secp.verify_bullet_proof(output_commit, r, None)
+				.map_err(|_| SwapError::InvalidRangeproof)?;
+		} else {
+			// milestone 3: only the last hop will have a rangeproof
+			return Err(SwapError::InvalidRangeproof);
+		}
+
+		let mut locked = self.submissions.lock().unwrap();
+		if locked.contains_key(&onion.commit) {
+			return Err(SwapError::AlreadySwapped {
+				commit: onion.commit.clone(),
+			});
+		}
+
+		locked.insert(
+			onion.commit,
+			Submission {
+				excess: peeled.0.excess,
+				output_commit,
+				rangeproof: peeled.0.rangeproof,
+				input,
+				fee,
+				onion: peeled.1,
+			},
+		);
+		Ok(())
 	}
 
 	/// Iterate through all saved submissions, filter out any inputs that are no longer spendable,
@@ -158,203 +227,73 @@ impl Server {
 	}
 }
 
-impl RPCServer for Server {
-	/// Implements the 'swap' API
-	fn swap(&self, swap: SwapReq) -> Result<Value> {
-		// milestone 3: check that enc_payloads length matches number of configured servers
-		if swap.onion.enc_payloads.len() != 1 {
-			return Err(Error::invalid_params(
-				"Multi server not supported until milestone 3",
-			));
-		}
+#[cfg(test)]
+pub mod mock {
+	use super::{Server, SwapError};
+	use crate::onion::Onion;
+	use crate::secp::ComSignature;
 
-		// Verify commitment signature to ensure caller owns the output
-		let serialized_onion = swap.onion.serialize().map_err(|e| Error {
-			message: e.to_string(),
-			code: ErrorCode::InternalError,
-			data: None,
-		})?;
-		let _ = swap
-			.comsig
-			.verify(&swap.onion.commit, &serialized_onion)
-			.map_err(|_| Error::invalid_params("ComSignature invalid"))?;
+	use std::collections::HashMap;
 
-		// Verify that commitment is unspent
-		let input = node::build_input(&self.node, &swap.onion.commit).map_err(|e| Error {
-			message: e.to_string(),
-			code: ErrorCode::InternalError,
-			data: None,
-		})?;
-		let input = input.ok_or(Error::invalid_params("Commitment not found"))?;
-
-		let peeled = swap
-			.onion
-			.peel_layer(&self.server_config.key)
-			.map_err(|e| Error::invalid_params(e.message()))?;
-
-		// Verify the fee meets the minimum
-		let fee: u64 = peeled.0.fee.into();
-		if fee < self.get_minimum_swap_fee() {
-			return Err(Error::invalid_params("Fee does not meet minimum"));
-		}
-
-		// Calculate final output commitment
-		let output_commit =
-			secp::add_excess(&swap.onion.commit, &peeled.0.excess).map_err(|e| Error {
-				message: e.to_string(),
-				code: ErrorCode::InternalError,
-				data: None,
-			})?;
-		let output_commit = secp::sub_value(&output_commit, fee).map_err(|e| Error {
-			message: e.to_string(),
-			code: ErrorCode::InternalError,
-			data: None,
-		})?;
-
-		// Verify the bullet proof and build the final output
-		if let Some(r) = peeled.0.rangeproof {
-			let secp = Secp256k1::with_caps(secp256k1zkp::ContextFlag::Commit);
-			secp.verify_bullet_proof(output_commit, r, None)
-				.map_err(|_| Error::invalid_params("RangeProof invalid"))?;
-		} else {
-			// milestone 3: only the last hop will have a rangeproof
-			return Err(Error::invalid_params("Rangeproof expected"));
-		}
-
-		let mut locked = self.submissions.lock().unwrap();
-		if locked.contains_key(&swap.onion.commit) {
-			return Err(Error::invalid_params("swap already called for coin"));
-		}
-
-		locked.insert(
-			swap.onion.commit,
-			Submission {
-				excess: peeled.0.excess,
-				output_commit,
-				rangeproof: peeled.0.rangeproof,
-				input,
-				fee,
-				onion: peeled.1,
-			},
-		);
-		Ok(Value::String("success".into()))
+	pub struct MockServer {
+		errors: HashMap<Onion, SwapError>,
 	}
-}
 
-/// Spin up the JSON-RPC web server
-pub fn listen(
-	server_config: ServerConfig,
-	wallet: Arc<dyn Wallet>,
-	node: Arc<dyn GrinNode>,
-	stop_state: Arc<StopState>,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-	let server = Arc::new(Server::new(
-		server_config.clone(),
-		wallet.clone(),
-		node.clone(),
-	));
-
-	let rpc_server = server.start_rpc();
-	println!("Server listening on {}", server.server_config.addr);
-
-	let close_handle = rpc_server.close_handle();
-	let round_handle = std::thread::spawn(move || {
-		let mut secs = 0;
-		loop {
-			if stop_state.is_stopped() {
-				close_handle.close();
-				break;
-			}
-
-			std::thread::sleep(Duration::from_secs(1));
-			secs = (secs + 1) % server.server_config.interval_s;
-
-			if secs == 0 {
-				let _ = server.execute_round();
-				secs = 0;
+	impl MockServer {
+		pub fn new() -> MockServer {
+			MockServer {
+				errors: HashMap::new(),
 			}
 		}
-	});
 
-	rpc_server.wait();
-	round_handle.join().unwrap();
+		pub fn set_response(&mut self, onion: &Onion, e: SwapError) {
+			self.errors.insert(onion.clone(), e);
+		}
+	}
 
-	Ok(())
+	impl Server for MockServer {
+		fn swap(&self, onion: &Onion, _comsig: &ComSignature) -> Result<(), SwapError> {
+			if let Some(e) = self.errors.get(&onion) {
+				return Err(e.clone());
+			}
+
+			Ok(())
+		}
+
+		fn execute_round(&self) -> crate::error::Result<()> {
+			Ok(())
+		}
+	}
 }
 
 #[cfg(test)]
 mod tests {
 	use crate::config::ServerConfig;
-	use crate::node::{GrinNode, MockGrinNode};
+	use crate::node::mock::MockGrinNode;
 	use crate::onion::test_util::{self, Hop};
-	use crate::secp::{self, ComSignature, PublicKey, Secp256k1};
-	use crate::server::{self, SwapReq};
+	use crate::onion::Onion;
+	use crate::secp::{self, ComSignature, PublicKey, Secp256k1, SecretKey};
+	use crate::server::{Server, ServerImpl, Submission, SwapError};
 	use crate::types::Payload;
-	use crate::wallet::{MockWallet, Wallet};
+	use crate::wallet::mock::MockWallet;
 
-	use grin_core::core::{Committed, FeeFields, Transaction};
+	use grin_core::core::{Committed, FeeFields, Input, OutputFeatures, Transaction};
 	use std::net::TcpListener;
 	use std::sync::Arc;
 
-	use hyper::{Body, Client, Request, Response};
-	use tokio::runtime;
-
-	async fn body_to_string(req: Response<Body>) -> String {
-		let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
-		String::from_utf8(body_bytes.to_vec()).unwrap()
-	}
-
-	/// Spin up a temporary web service, query the API, then cleanup and return response
-	fn make_request(
-		server_key: secp::SecretKey,
-		wallet: Arc<dyn Wallet>,
-		node: Arc<dyn GrinNode>,
-		req: String,
-	) -> Result<String, Box<dyn std::error::Error>> {
-		let server_config = ServerConfig {
-			key: server_key,
+	fn new_config(server_key: &SecretKey) -> ServerConfig {
+		ServerConfig {
+			key: server_key.clone(),
 			interval_s: 1,
-			addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
-			grin_node_url: "127.0.0.1:3413".parse()?,
+			addr: TcpListener::bind("127.0.0.1:0")
+				.unwrap()
+				.local_addr()
+				.unwrap(),
+			grin_node_url: "127.0.0.1:3413".parse().unwrap(),
 			grin_node_secret_path: None,
-			wallet_owner_url: "127.0.0.1:3420".parse()?,
+			wallet_owner_url: "127.0.0.1:3420".parse().unwrap(),
 			wallet_owner_secret_path: None,
-		};
-
-		let server_impl = Arc::new(server::ServerImpl::new(
-			server_config.clone(),
-			wallet.clone(),
-			node.clone(),
-		));
-
-		// Start the server
-		let rpc_server = server_impl.start_server();
-
-		let uri = format!("http://{}/v1", server_config.addr);
-
-		let threaded_rt = runtime::Runtime::new()?;
-		let do_request = async move {
-			let request = Request::post(uri)
-				.header("Content-Type", "application/json")
-				.body(Body::from(req))
-				.unwrap();
-
-			Client::new().request(request).await
-		};
-
-		let response = threaded_rt.block_on(do_request)?;
-		let response_str: String = threaded_rt.block_on(body_to_string(response));
-
-		// Wait for shutdown
-		threaded_rt.shutdown_background();
-
-		// Execute one round
-		server_impl.execute_round()?;
-
-		// Stop the server
-		rpc_server.close();
-
-		Ok(response_str)
+		}
 	}
 
 	/// Single hop to demonstrate request validation and onion unwrapping.
@@ -366,7 +305,7 @@ mod tests {
 		let value: u64 = 200_000_000;
 		let fee: u64 = 50_000_000;
 		let blind = secp::random_secret();
-		let commitment = secp::commit(value, &blind)?;
+		let input_commit = secp::commit(value, &blind)?;
 		let hop_excess = secp::random_secret();
 		let nonce = secp::random_secret();
 
@@ -384,40 +323,59 @@ mod tests {
 		let hop = Hop {
 			pubkey: PublicKey::from_secret_key(&secp, &server_key)?,
 			payload: Payload {
-				excess: hop_excess,
+				excess: hop_excess.clone(),
 				fee: FeeFields::from(fee as u32),
 				rangeproof: Some(proof),
 			},
 		};
 		let hops: Vec<Hop> = vec![hop];
 		let session_key = secp::random_secret();
-		let onion_packet = test_util::create_onion(&commitment, &session_key, &hops)?;
+		let onion_packet = test_util::create_onion(&input_commit, &session_key, &hops)?;
 		let comsig = ComSignature::sign(value, &blind, &onion_packet.serialize()?)?;
-		let swap = SwapReq {
-			onion: onion_packet,
-			comsig,
-		};
 
-		let wallet = MockWallet {};
+		let wallet = Arc::new(MockWallet {});
 		let mut mut_node = MockGrinNode::new();
-		mut_node.add_default_utxo(&commitment);
+		mut_node.add_default_utxo(&input_commit);
 		let node = Arc::new(mut_node);
 
-		let req = format!(
-			"{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}",
-			serde_json::json!(swap)
-		);
-		println!("Request: {}", req);
-		let response = make_request(server_key, Arc::new(wallet), node.clone(), req)?;
-		let expected = "{\"jsonrpc\":\"2.0\",\"result\":\"success\",\"id\":\"1\"}\n";
-		assert_eq!(response, expected);
+		let server = ServerImpl::new(new_config(&server_key), wallet.clone(), node.clone());
+		server.swap(&onion_packet, &comsig)?;
+
+		// Make sure entry is added to server.
+		let output_commit = secp::add_excess(&input_commit, &hop_excess)?;
+		let output_commit = secp::sub_value(&output_commit, fee)?;
+
+		let expected = Submission {
+			excess: hop_excess.clone(),
+			output_commit: output_commit.clone(),
+			rangeproof: Some(proof),
+			input: Input::new(OutputFeatures::Plain, input_commit.clone()),
+			fee,
+			onion: Onion {
+				ephemeral_pubkey: test_util::next_ephemeral_pubkey(&onion_packet, &server_key)?,
+				commit: output_commit.clone(),
+				enc_payloads: vec![],
+			},
+		};
+
+		{
+			let submissions = server.submissions.lock().unwrap();
+			assert_eq!(1, submissions.len());
+			assert!(submissions.contains_key(&input_commit));
+			assert_eq!(&expected, submissions.get(&input_commit).unwrap());
+		}
+
+		server.execute_round()?;
+
+		// Make sure entry is removed from server.submissions
+		assert!(server.submissions.lock().unwrap().is_empty());
 
 		// check that the transaction was posted
 		let posted_txns = node.get_posted_txns();
 		assert_eq!(posted_txns.len(), 1);
 		let posted_txn: Transaction = posted_txns.into_iter().next().unwrap();
-		let input_commit = posted_txn.inputs_committed().into_iter().next().unwrap();
-		assert_eq!(input_commit, commitment);
+		let posted_input = posted_txn.inputs_committed().into_iter().next().unwrap();
+		assert_eq!(input_commit, posted_input);
 
 		Ok(())
 	}
@@ -445,39 +403,25 @@ mod tests {
 		let session_key = secp::random_secret();
 		let onion_packet = test_util::create_onion(&commitment, &session_key, &hops)?;
 		let comsig = ComSignature::sign(value, &blind, &onion_packet.serialize()?)?;
-		let swap = SwapReq {
-			onion: onion_packet,
-			comsig,
-		};
 
-		let wallet = MockWallet {};
-		let node = MockGrinNode::new();
+		let wallet = Arc::new(MockWallet {});
+		let node = Arc::new(MockGrinNode::new());
 
-		let req = format!(
-			"{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}",
-			serde_json::json!(swap)
+		let server = ServerImpl::new(new_config(&server_key), wallet.clone(), node.clone());
+		let result = server.swap(&onion_packet, &comsig);
+		assert!(result.is_err());
+		assert_eq!(
+			SwapError::CoinNotFound {
+				commit: commitment.clone()
+			},
+			result.unwrap_err()
 		);
-		let response = make_request(server_key, Arc::new(wallet), Arc::new(node), req)?;
-		let expected = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Commitment not found\"},\"id\":\"1\"}\n";
-		assert_eq!(response, expected);
+
+		// Make sure no entry is added to server.submissions
+		assert!(server.submissions.lock().unwrap().is_empty());
+
 		Ok(())
 	}
 
 	// TODO: Test bulletproof verification and test minimum fee
-
-	#[test]
-	fn swap_bad_request() -> Result<(), Box<dyn std::error::Error>> {
-		let wallet = MockWallet {};
-		let node = MockGrinNode::new();
-
-		let params = "{ \"param\": \"Not a valid Swap request\" }";
-		let req = format!(
-			"{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}",
-			params
-		);
-		let response = make_request(secp::random_secret(), Arc::new(wallet), Arc::new(node), req)?;
-		let expected = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Invalid params: missing field `onion`.\"},\"id\":\"1\"}\n";
-		assert_eq!(response, expected);
-		Ok(())
-	}
 }
