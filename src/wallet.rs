@@ -108,7 +108,7 @@ impl HttpWallet {
 		wallet_pass: &ZeroingString,
 	) -> Result<HttpWallet> {
 		println!("Opening wallet at {}", wallet_owner_url);
-		let shared_key = HttpWallet::init_secure_api(&wallet_owner_url)?;
+		let shared_key = HttpWallet::init_secure_api(&wallet_owner_url, &wallet_owner_secret)?;
 
 		let open_wallet_params = json!({
 			"name": null,
@@ -131,7 +131,10 @@ impl HttpWallet {
 		})
 	}
 
-	fn init_secure_api(wallet_owner_url: &SocketAddr) -> Result<SecretKey> {
+	fn init_secure_api(
+		wallet_owner_url: &SocketAddr,
+		wallet_owner_secret: &Option<String>,
+	) -> Result<SecretKey> {
 		let secp = Secp256k1::new();
 		let ephemeral_sk = secp::random_secret();
 		let ephemeral_pk = PublicKey::from_secret_key(&secp, &ephemeral_sk)?;
@@ -139,8 +142,12 @@ impl HttpWallet {
 			"ecdh_pubkey": ephemeral_pk.serialize_vec(&secp, true).to_hex()
 		});
 
-		let response_pk: ECDHPubkey =
-			HttpWallet::send_json_request(&wallet_owner_url, "init_secure_api", &init_params)?;
+		let response_pk: ECDHPubkey = HttpWallet::send_json_request(
+			&wallet_owner_url,
+			&wallet_owner_secret,
+			"init_secure_api",
+			&init_params,
+		)?;
 
 		let shared_key = {
 			let mut shared_pubkey = response_pk.ecdh_pubkey.clone();
@@ -181,12 +188,14 @@ impl HttpWallet {
 
 	fn send_json_request<D: serde::de::DeserializeOwned>(
 		wallet_owner_url: &SocketAddr,
+		wallet_owner_secret: &Option<String>,
 		method: &str,
 		params: &serde_json::Value,
 	) -> Result<D> {
 		let url = format!("http://{}{}", wallet_owner_url, ENDPOINT);
 		let req = build_request(method, params);
-		let res = client::post::<Request, Response>(url.as_str(), None, &req)?;
+		let res =
+			client::post::<Request, Response>(url.as_str(), wallet_owner_secret.clone(), &req)?;
 		let parsed = res.clone().into_result()?;
 		Ok(parsed)
 	}
