@@ -1,7 +1,7 @@
 use crate::config::ServerConfig;
 use crate::node::{self, GrinNode};
 use crate::onion::Onion;
-use crate::secp::{self, ComSignature, Commitment, RangeProof, Secp256k1, SecretKey};
+use crate::secp::{ComSignature, Commitment, RangeProof, Secp256k1, SecretKey};
 use crate::wallet::{self, Wallet};
 
 use grin_core::core::{Input, Output, OutputFeatures, TransactionBody};
@@ -137,16 +137,10 @@ impl Server for ServerImpl {
 			});
 		}
 
-		// Calculate final output commitment
-		let output_commit = secp::add_excess(&onion.commit, &peeled.0.excess)
-			.map_err(|e| SwapError::UnknownError(e.to_string()))?;
-		let output_commit = secp::sub_value(&output_commit, fee)
-			.map_err(|e| SwapError::UnknownError(e.to_string()))?;
-
 		// Verify the bullet proof and build the final output
 		if let Some(r) = peeled.0.rangeproof {
 			let secp = Secp256k1::with_caps(secp256k1zkp::ContextFlag::Commit);
-			secp.verify_bullet_proof(output_commit, r, None)
+			secp.verify_bullet_proof(peeled.1.commit, r, None)
 				.map_err(|_| SwapError::InvalidRangeproof)?;
 		} else {
 			// milestone 3: only the last hop will have a rangeproof
@@ -164,7 +158,7 @@ impl Server for ServerImpl {
 			onion.commit,
 			Submission {
 				excess: peeled.0.excess,
-				output_commit,
+				output_commit: peeled.1.commit,
 				rangeproof: peeled.0.rangeproof,
 				input,
 				fee,

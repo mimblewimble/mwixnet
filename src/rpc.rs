@@ -114,7 +114,6 @@ pub fn listen(
 
 			if secs == 0 {
 				let _ = server.lock().unwrap().execute_round();
-				secs = 0;
 			}
 		}
 	});
