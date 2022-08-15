@@ -1,213 +1,649 @@
-use crate::onion;
-use crate::secp::{self, Commitment, ComSignature, SecretKey};
-use crate::ser;
-use crate::types::Onion;
+use crate::config::ServerConfig;
+use crate::node::{self, GrinNode};
+use crate::onion::Onion;
+use crate::secp::{ComSignature, Commitment, RangeProof, Secp256k1, SecretKey};
+use crate::wallet::{self, Wallet};
 
-use jsonrpc_derive::rpc;
-use jsonrpc_http_server::*;
-use jsonrpc_http_server::jsonrpc_core::*;
-use jsonrpc_core::{Result, Value};
-use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
-use std::sync::Mutex;
+use grin_core::core::{Input, Output, OutputFeatures, TransactionBody};
+use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
+use itertools::Itertools;
+use std::collections::HashMap;
+use std::result::Result;
+use std::sync::{Arc, Mutex};
+use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ServerConfig {
-    pub key: SecretKey,
-    pub addr: SocketAddr,
-    pub is_first: bool,
+struct Submission {
+	/// The total excess for the output commitment
+	excess: SecretKey,
+	/// The derived output commitment after applying excess and fee
+	output_commit: Commitment,
+	/// The rangeproof, included only for the final hop (node N)
+	rangeproof: Option<RangeProof>,
+	/// Transaction input being spent
+	input: Input,
+	/// Transaction fee
+	fee: u64,
+	/// The remaining onion after peeling off our layer
+	onion: Onion,
 }
 
-pub struct Submission {
-    pub excess: SecretKey,
-    pub input_commit: Commitment,
-    pub onion: Onion,
+/// Swap error types
+#[derive(Clone, Error, Debug, PartialEq)]
+pub enum SwapError {
+	#[error("Invalid number of payloads provided (expected {expected:?}, found {found:?})")]
+	InvalidPayloadLength { expected: usize, found: usize },
+	#[error("Commitment Signature is invalid")]
+	InvalidComSignature,
+	#[error("Rangeproof is invalid")]
+	InvalidRangeproof,
+	#[error("Rangeproof is required but was not supplied")]
+	MissingRangeproof,
+	#[error("Output {commit:?} does not exist, or is already spent.")]
+	CoinNotFound { commit: Commitment },
+	#[error("Output {commit:?} is already in the swap list.")]
+	AlreadySwapped { commit: Commitment },
+	#[error("Failed to peel onion layer: {0}")]
+	PeelOnionFailure(String),
+	#[error("Fee too low (expected >= {minimum_fee:?}, actual {actual_fee:?})")]
+	FeeTooLow { minimum_fee: u64, actual_fee: u64 },
+	#[error("{0}")]
+	UnknownError(String),
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct SwapReq {
-    pub onion: Onion,
-    #[serde(with = "ser::vec_serde")]
-    pub msg: Vec<u8>,
-    #[serde(with = "secp::comsig_serde")]
-    pub comsig: ComSignature,
+/// A MWixnet server
+pub trait Server: Send + Sync {
+	/// Submit a new output to be swapped.
+	fn swap(&self, onion: &Onion, comsig: &ComSignature) -> Result<(), SwapError>;
+
+	/// Iterate through all saved submissions, filter out any inputs that are no longer spendable,
+	/// and assemble the coinswap transaction, posting the transaction to the configured node.
+	///
+	/// Currently only a single mix node is used. Milestone 3 will include support for multiple mix nodes.
+	fn execute_round(&self) -> crate::error::Result<()>;
 }
 
-lazy_static! {
-    static ref SERVER_STATE: Mutex<Vec<Submission>> = Mutex::new(Vec::new());
-}
-
-#[rpc(server)]
-pub trait Server {
-    #[rpc(name = "swap")]
-    fn swap(&self, swap: SwapReq) -> Result<Value>;
-
-    // milestone 3:
-    // fn derive_outputs(&self, entries: Vec<Onion>) -> Result<Value>;
-    // fn derive_kernel(&self, tx: Tx) -> Result<Value>;
-}
-
+/// The standard MWixnet server implementation
+#[derive(Clone)]
 pub struct ServerImpl {
-    server_key: SecretKey,
+	server_config: ServerConfig,
+	wallet: Arc<dyn Wallet>,
+	node: Arc<dyn GrinNode>,
+	submissions: Arc<Mutex<HashMap<Commitment, Submission>>>,
 }
 
 impl ServerImpl {
-    pub fn new(server_key: SecretKey) -> Self {
-        ServerImpl { server_key }
-    }
+	/// Create a new MWixnet server
+	pub fn new(
+		server_config: ServerConfig,
+		wallet: Arc<dyn Wallet>,
+		node: Arc<dyn GrinNode>,
+	) -> Self {
+		ServerImpl {
+			server_config,
+			wallet,
+			node,
+			submissions: Arc::new(Mutex::new(HashMap::new())),
+		}
+	}
+
+	/// The fee base to use. For now, just using the default.
+	fn get_fee_base(&self) -> u64 {
+		DEFAULT_ACCEPT_FEE_BASE
+	}
+
+	/// Minimum fee to perform a swap.
+	/// Requires enough fee for the mwixnet server's kernel, 1 input and its output to swap.
+	fn get_minimum_swap_fee(&self) -> u64 {
+		TransactionBody::weight_by_iok(1, 1, 1) * self.get_fee_base()
+	}
 }
 
 impl Server for ServerImpl {
-    fn swap(&self, swap: SwapReq) -> Result<Value> {
-        // milestone 2 - check that commitment is unspent
-    
-        // Verify commitment signature to ensure caller owns the output
-        let _ = swap.comsig.verify(&swap.onion.commit, &swap.msg)
-            .map_err(|_| jsonrpc_core::Error::invalid_params("ComSignature invalid"))?;
-    
-        let peeled = onion::peel_layer(&swap.onion, &self.server_key)
-            .map_err(|e| jsonrpc_core::Error::invalid_params(e.message()))?;
-        SERVER_STATE.lock().unwrap().push(Submission{
-            excess: peeled.0.excess,
-            input_commit: swap.onion.commit,
-            onion: peeled.1
-        });
-        Ok(Value::String("success".into()))
-    }
-    
+	fn swap(&self, onion: &Onion, comsig: &ComSignature) -> Result<(), SwapError> {
+		// milestone 3: check that enc_payloads length matches number of configured servers
+		if onion.enc_payloads.len() != 1 {
+			return Err(SwapError::InvalidPayloadLength {
+				expected: 1,
+				found: onion.enc_payloads.len(),
+			});
+		}
+
+		// Verify commitment signature to ensure caller owns the output
+		let serialized_onion = onion
+			.serialize()
+			.map_err(|e| SwapError::UnknownError(e.to_string()))?;
+		let _ = comsig
+			.verify(&onion.commit, &serialized_onion)
+			.map_err(|_| SwapError::InvalidComSignature)?;
+
+		// Verify that commitment is unspent
+		let input = node::build_input(&self.node, &onion.commit)
+			.map_err(|e| SwapError::UnknownError(e.to_string()))?;
+		let input = input.ok_or(SwapError::CoinNotFound {
+			commit: onion.commit.clone(),
+		})?;
+
+		let peeled = onion
+			.peel_layer(&self.server_config.key)
+			.map_err(|e| SwapError::PeelOnionFailure(e.message()))?;
+
+		// Verify the fee meets the minimum
+		let fee: u64 = peeled.0.fee.into();
+		if fee < self.get_minimum_swap_fee() {
+			return Err(SwapError::FeeTooLow {
+				minimum_fee: self.get_minimum_swap_fee(),
+				actual_fee: fee,
+			});
+		}
+
+		// Verify the bullet proof and build the final output
+		if let Some(r) = peeled.0.rangeproof {
+			let secp = Secp256k1::with_caps(secp256k1zkp::ContextFlag::Commit);
+			secp.verify_bullet_proof(peeled.1.commit, r, None)
+				.map_err(|_| SwapError::InvalidRangeproof)?;
+		} else {
+			// milestone 3: only the last hop will have a rangeproof
+			return Err(SwapError::MissingRangeproof);
+		}
+
+		let mut locked = self.submissions.lock().unwrap();
+		if locked.contains_key(&onion.commit) {
+			return Err(SwapError::AlreadySwapped {
+				commit: onion.commit.clone(),
+			});
+		}
+
+		locked.insert(
+			onion.commit,
+			Submission {
+				excess: peeled.0.excess,
+				output_commit: peeled.1.commit,
+				rangeproof: peeled.0.rangeproof,
+				input,
+				fee,
+				onion: peeled.1,
+			},
+		);
+		Ok(())
+	}
+
+	fn execute_round(&self) -> crate::error::Result<()> {
+		let mut locked_state = self.submissions.lock().unwrap();
+		let next_block_height = self.node.get_chain_height()? + 1;
+
+		let spendable: Vec<Submission> = locked_state
+			.values()
+			.into_iter()
+			.unique_by(|s| s.output_commit)
+			.filter(|s| {
+				node::is_spendable(&self.node, &s.input.commit, next_block_height).unwrap_or(false)
+			})
+			.filter(|s| !node::is_unspent(&self.node, &s.output_commit).unwrap_or(true))
+			.cloned()
+			.collect();
+
+		if spendable.len() == 0 {
+			return Ok(());
+		}
+
+		let total_fee: u64 = spendable.iter().enumerate().map(|(_, s)| s.fee).sum();
+
+		let inputs: Vec<Input> = spendable.iter().enumerate().map(|(_, s)| s.input).collect();
+
+		let outputs: Vec<Output> = spendable
+			.iter()
+			.enumerate()
+			.map(|(_, s)| {
+				Output::new(
+					OutputFeatures::Plain,
+					s.output_commit,
+					s.rangeproof.unwrap(),
+				)
+			})
+			.collect();
+
+		let excesses: Vec<SecretKey> = spendable
+			.iter()
+			.enumerate()
+			.map(|(_, s)| s.excess.clone())
+			.collect();
+
+		let tx = wallet::assemble_tx(
+			&self.wallet,
+			&inputs,
+			&outputs,
+			self.get_fee_base(),
+			total_fee,
+			&excesses,
+		)?;
+
+		self.node.post_tx(&tx)?;
+		locked_state.clear();
+
+		Ok(())
+	}
 }
 
-/// Spin up the JSON-RPC web server
-pub fn listen<F>(server_config: &ServerConfig, shutdown_signal: F) -> std::result::Result<(), Box<dyn std::error::Error>>
-where
-    F: futures::future::Future<Output = ()> + Send + 'static,
-{
-    let mut io = IoHandler::new();
-    io.extend_with(ServerImpl::to_delegate(ServerImpl::new(server_config.key.clone())));
+#[cfg(test)]
+pub mod mock {
+	use super::{Server, SwapError};
+	use crate::onion::Onion;
+	use crate::secp::ComSignature;
 
-    let server = ServerBuilder::new(io)
-        .cors(DomainsValidation::Disabled)
-        .request_middleware(|request: hyper::Request<hyper::Body>| {
-            if request.uri() == "/v1" {
-                request.into()
-            } else {
-                jsonrpc_http_server::Response::bad_request("Only v1 supported").into()
-            }
-        })
-        .start_http(&server_config.addr)
-        .expect("Unable to start RPC server");
+	use std::collections::HashMap;
 
-    let close_handle = server.close_handle();
-    std::thread::spawn(move || {
-        futures::executor::block_on(shutdown_signal);
-        close_handle.close();
-    });
-    server.wait();
+	pub struct MockServer {
+		errors: HashMap<Onion, SwapError>,
+	}
 
-    Ok(())
+	impl MockServer {
+		pub fn new() -> MockServer {
+			MockServer {
+				errors: HashMap::new(),
+			}
+		}
+
+		pub fn set_response(&mut self, onion: &Onion, e: SwapError) {
+			self.errors.insert(onion.clone(), e);
+		}
+	}
+
+	impl Server for MockServer {
+		fn swap(&self, onion: &Onion, _comsig: &ComSignature) -> Result<(), SwapError> {
+			if let Some(e) = self.errors.get(&onion) {
+				return Err(e.clone());
+			}
+
+			Ok(())
+		}
+
+		fn execute_round(&self) -> crate::error::Result<()> {
+			Ok(())
+		}
+	}
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{onion, secp, server, types};
-    use std::net::TcpListener;
-    use std::time::Duration;
-    use std::thread;
+	use crate::config::ServerConfig;
+	use crate::node::mock::MockGrinNode;
+	use crate::onion::test_util::{self, Hop};
+	use crate::onion::Onion;
+	use crate::secp::{
+		self, ComSignature, Commitment, PublicKey, RangeProof, Secp256k1, SecretKey,
+	};
+	use crate::server::{Server, ServerImpl, Submission, SwapError};
+	use crate::types::Payload;
+	use crate::wallet::mock::MockWallet;
 
-    use hyper::{Body, Client, Request, Response};
-    use tokio::runtime;
+	use grin_core::core::{Committed, FeeFields, Input, OutputFeatures, Transaction, Weighting};
+	use grin_core::global::{self, ChainTypes};
+	use std::net::TcpListener;
+	use std::sync::Arc;
 
-    async fn body_to_string(req: Response<Body>) -> String {
-        let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
-        String::from_utf8(body_bytes.to_vec()).unwrap()
-    }
+	macro_rules! assert_error_type {
+		($result:expr, $error_type:pat) => {
+			assert!($result.is_err());
+			assert!(if let $error_type = $result.unwrap_err() {
+				true
+			} else {
+				false
+			});
+		};
+	}
 
-    /// Spin up a temporary web service, query the API, then cleanup and return response
-    fn make_request(server_key: secp::SecretKey, req: String) -> Result<String, Box<dyn std::error::Error>> {
-        let server_config = server::ServerConfig { 
-            key: server_key,
-            addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
-            is_first: true
-        };
+	fn new_server(
+		server_key: &SecretKey,
+		utxos: &Vec<&Commitment>,
+	) -> (ServerImpl, Arc<MockGrinNode>) {
+		let config = ServerConfig {
+			key: server_key.clone(),
+			interval_s: 1,
+			addr: TcpListener::bind("127.0.0.1:0")
+				.unwrap()
+				.local_addr()
+				.unwrap(),
+			grin_node_url: "127.0.0.1:3413".parse().unwrap(),
+			grin_node_secret_path: None,
+			wallet_owner_url: "127.0.0.1:3420".parse().unwrap(),
+			wallet_owner_secret_path: None,
+		};
+		let wallet = Arc::new(MockWallet {});
+		let mut mut_node = MockGrinNode::new();
+		for utxo in utxos {
+			mut_node.add_default_utxo(&utxo);
+		}
+		let node = Arc::new(mut_node);
 
-        let threaded_rt = runtime::Runtime::new()?;
-        let (shutdown_sender, shutdown_receiver) = futures::channel::oneshot::channel();
-        let uri = format!("http://{}/v1", server_config.addr);
+		let server = ServerImpl::new(config, wallet.clone(), node.clone());
+		(server, node)
+	}
 
-        // Spawn the server task
-        threaded_rt.spawn(async move {
-            server::listen(&server_config, async { shutdown_receiver.await.ok(); }).unwrap()
-        });
+	fn proof(value: u64, fee: u64, input_blind: &SecretKey, hop_excess: &SecretKey) -> RangeProof {
+		let secp = Secp256k1::new();
+		let nonce = secp::random_secret();
 
-        // Wait for listener
-        thread::sleep(Duration::from_millis(500));
+		let mut blind = input_blind.clone();
+		blind.add_assign(&secp, &hop_excess).unwrap();
 
-        let do_request = async move {
-            let request = Request::post(uri)
-                .header("Content-Type", "application/json")
-                .body(Body::from(req))
-                .unwrap();
+		secp.bullet_proof(
+			value - fee,
+			blind.clone(),
+			nonce.clone(),
+			nonce.clone(),
+			None,
+			None,
+		)
+	}
 
-            Client::new().request(request).await
-        };
+	fn new_hop(
+		server_key: &SecretKey,
+		hop_excess: &SecretKey,
+		fee: u64,
+		proof: Option<RangeProof>,
+	) -> Hop {
+		let secp = Secp256k1::new();
+		Hop {
+			pubkey: PublicKey::from_secret_key(&secp, &server_key).unwrap(),
+			payload: Payload {
+				excess: hop_excess.clone(),
+				fee: FeeFields::from(fee as u32),
+				rangeproof: proof,
+			},
+		}
+	}
 
-        let response = threaded_rt.block_on(do_request)?;
-        let response_str: String = threaded_rt.block_on(body_to_string(response));
+	/// Single hop to demonstrate request validation and onion unwrapping.
+	#[test]
+	fn swap_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+		let value: u64 = 200_000_000;
+		let fee: u64 = 50_000_000;
+		let blind = secp::random_secret();
+		let input_commit = secp::commit(value, &blind)?;
 
-        shutdown_sender.send(()).ok();
+		let server_key = secp::random_secret();
+		let hop_excess = secp::random_secret();
+		let proof = proof(value, fee, &blind, &hop_excess);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
 
-        // Wait for shutdown
-        thread::sleep(Duration::from_millis(500));
-        threaded_rt.shutdown_background();
+		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
-        Ok(response_str)
-    }
+		let (server, node) = new_server(&server_key, &vec![&input_commit]);
+		server.swap(&onion, &comsig)?;
 
-    /// Single hop to demonstrate request validation and onion unwrapping.
-    /// UTXO creation and bulletproof generation reserved for milestones 2 & 3.
-    #[test]
-    fn swap_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
-        let server_key = secp::insecure_rand_secret()?;
-        
-        let secp = secp::Secp256k1::new();
-        let value: u64 = 100;
-        let blind = secp::insecure_rand_secret()?;
-        let commitment = secp::commit(value, &blind)?;
-        let session_key = secp::insecure_rand_secret()?;
+		// Make sure entry is added to server.
+		let output_commit = secp::add_excess(&input_commit, &hop_excess)?;
+		let output_commit = secp::sub_value(&output_commit, fee)?;
 
-        let hop = types::Hop {
-            pubkey: secp::PublicKey::from_secret_key(&secp, &server_key)?,
-            payload: types::Payload{
-                excess: secp::insecure_rand_secret()?,
-                rangeproof: None,
-            }
-        };
-        let hops: Vec<types::Hop> = vec![hop];
-        let onion_packet = onion::create_onion(&commitment, &session_key, &hops)?;
-        let msg : Vec<u8> = vec![0u8, 1u8, 2u8, 3u8];
-        let comsig = secp::ComSignature::sign(value, &blind, &msg)?;
-        let swap = server::SwapReq{
-            onion: onion_packet,
-            msg: msg,
-            comsig: comsig,
-        };
+		let expected = Submission {
+			excess: hop_excess.clone(),
+			output_commit: output_commit.clone(),
+			rangeproof: Some(proof),
+			input: Input::new(OutputFeatures::Plain, input_commit.clone()),
+			fee,
+			onion: Onion {
+				ephemeral_pubkey: test_util::next_ephemeral_pubkey(&onion, &server_key)?,
+				commit: output_commit.clone(),
+				enc_payloads: vec![],
+			},
+		};
 
-        let req = format!("{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}", serde_json::json!(swap));
-        let response = make_request(server_key, req)?;
-        let expected = "{\"jsonrpc\":\"2.0\",\"result\":\"success\",\"id\":\"1\"}\n";
-        assert_eq!(response, expected);
-        Ok(())
-    }
+		{
+			let submissions = server.submissions.lock().unwrap();
+			assert_eq!(1, submissions.len());
+			assert!(submissions.contains_key(&input_commit));
+			assert_eq!(&expected, submissions.get(&input_commit).unwrap());
+		}
 
-    #[test]
-    fn swap_bad_request() -> Result<(), Box<dyn std::error::Error>> {
-        let params = "{ \"param\": \"Not a valid Swap request\" }";
-        let req = format!("{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}", params);
-        let response = make_request(secp::insecure_rand_secret()?, req)?;
-        let expected = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Invalid params: missing field `onion`.\"},\"id\":\"1\"}\n";
-        assert_eq!(response, expected);
-        Ok(())
-    }
+		server.execute_round()?;
 
-    // milestone 2 - add tests to cover invalid comsig's & inputs not in utxo set
+		// Make sure entry is removed from server.submissions
+		assert!(server.submissions.lock().unwrap().is_empty());
+
+		// check that the transaction was posted
+		let posted_txns = node.get_posted_txns();
+		assert_eq!(posted_txns.len(), 1);
+		let posted_txn: Transaction = posted_txns.into_iter().next().unwrap();
+		assert!(posted_txn.inputs_committed().contains(&input_commit));
+		assert!(posted_txn.outputs_committed().contains(&output_commit));
+		// todo: check that outputs also contain the commitment generated by our wallet
+
+		global::set_local_chain_type(ChainTypes::AutomatedTesting);
+		posted_txn.validate(Weighting::AsTransaction)?;
+
+		Ok(())
+	}
+
+	/// Returns InvalidPayloadLength when too many payloads are provided.
+	#[test]
+	fn swap_too_many_payloads() -> Result<(), Box<dyn std::error::Error>> {
+		let value: u64 = 200_000_000;
+		let fee: u64 = 50_000_000;
+		let blind = secp::random_secret();
+		let input_commit = secp::commit(value, &blind)?;
+
+		let server_key = secp::random_secret();
+		let hop_excess = secp::random_secret();
+		let proof = proof(value, fee, &blind, &hop_excess);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
+
+		let hops: Vec<Hop> = vec![hop.clone(), hop.clone()]; // Multiple payloads
+		let onion = test_util::create_onion(&input_commit, &hops)?;
+		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
+
+		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let result = server.swap(&onion, &comsig);
+		assert_eq!(
+			Err(SwapError::InvalidPayloadLength {
+				expected: 1,
+				found: 2
+			}),
+			result
+		);
+
+		// Make sure no entry is added to server.submissions
+		assert!(server.submissions.lock().unwrap().is_empty());
+
+		Ok(())
+	}
+
+	/// Returns InvalidComSignature when ComSignature fails to verify.
+	#[test]
+	fn swap_invalid_com_signature() -> Result<(), Box<dyn std::error::Error>> {
+		let value: u64 = 200_000_000;
+		let fee: u64 = 50_000_000;
+		let blind = secp::random_secret();
+		let input_commit = secp::commit(value, &blind)?;
+
+		let server_key = secp::random_secret();
+		let hop_excess = secp::random_secret();
+		let proof = proof(value, fee, &blind, &hop_excess);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
+
+		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+
+		let wrong_blind = secp::random_secret();
+		let comsig = ComSignature::sign(value, &wrong_blind, &onion.serialize()?)?;
+
+		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let result = server.swap(&onion, &comsig);
+		assert_eq!(Err(SwapError::InvalidComSignature), result);
+
+		// Make sure no entry is added to server.submissions
+		assert!(server.submissions.lock().unwrap().is_empty());
+
+		Ok(())
+	}
+
+	/// Returns InvalidRangeProof when the rangeproof fails to verify for the commitment.
+	#[test]
+	fn swap_invalid_rangeproof() -> Result<(), Box<dyn std::error::Error>> {
+		let value: u64 = 200_000_000;
+		let fee: u64 = 50_000_000;
+		let blind = secp::random_secret();
+		let input_commit = secp::commit(value, &blind)?;
+
+		let server_key = secp::random_secret();
+		let hop_excess = secp::random_secret();
+		let wrong_value = value + 10_000_000;
+		let proof = proof(wrong_value, fee, &blind, &hop_excess);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
+
+		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
+
+		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let result = server.swap(&onion, &comsig);
+		assert_eq!(Err(SwapError::InvalidRangeproof), result);
+
+		// Make sure no entry is added to server.submissions
+		assert!(server.submissions.lock().unwrap().is_empty());
+
+		Ok(())
+	}
+
+	/// Returns MissingRangeproof when no rangeproof is provided.
+	#[test]
+	fn swap_missing_rangeproof() -> Result<(), Box<dyn std::error::Error>> {
+		let value: u64 = 200_000_000;
+		let fee: u64 = 50_000_000;
+		let blind = secp::random_secret();
+		let input_commit = secp::commit(value, &blind)?;
+
+		let server_key = secp::random_secret();
+		let hop_excess = secp::random_secret();
+		let hop = new_hop(&server_key, &hop_excess, fee, None);
+
+		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
+
+		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let result = server.swap(&onion, &comsig);
+		assert_eq!(Err(SwapError::MissingRangeproof), result);
+
+		// Make sure no entry is added to server.submissions
+		assert!(server.submissions.lock().unwrap().is_empty());
+
+		Ok(())
+	}
+
+	/// Returns CoinNotFound when there's no matching output in the UTXO set.
+	#[test]
+	fn swap_utxo_missing() -> Result<(), Box<dyn std::error::Error>> {
+		let value: u64 = 200_000_000;
+		let fee: u64 = 50_000_000;
+		let blind = secp::random_secret();
+		let input_commit = secp::commit(value, &blind)?;
+
+		let server_key = secp::random_secret();
+		let hop_excess = secp::random_secret();
+		let proof = proof(value, fee, &blind, &hop_excess);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
+
+		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
+
+		let (server, _node) = new_server(&server_key, &vec![]);
+		let result = server.swap(&onion, &comsig);
+		assert_eq!(
+			Err(SwapError::CoinNotFound {
+				commit: input_commit.clone()
+			}),
+			result
+		);
+
+		// Make sure no entry is added to server.submissions
+		assert!(server.submissions.lock().unwrap().is_empty());
+
+		Ok(())
+	}
+
+	/// Returns AlreadySwapped when trying to swap the same commitment multiple times.
+	#[test]
+	fn swap_already_swapped() -> Result<(), Box<dyn std::error::Error>> {
+		let value: u64 = 200_000_000;
+		let fee: u64 = 50_000_000;
+		let blind = secp::random_secret();
+		let input_commit = secp::commit(value, &blind)?;
+
+		let server_key = secp::random_secret();
+		let hop_excess = secp::random_secret();
+		let proof = proof(value, fee, &blind, &hop_excess);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
+
+		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
+
+		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		server.swap(&onion, &comsig)?;
+
+		// Call swap a second time
+		let result = server.swap(&onion, &comsig);
+		assert_eq!(
+			Err(SwapError::AlreadySwapped {
+				commit: input_commit.clone()
+			}),
+			result
+		);
+
+		Ok(())
+	}
+
+	/// Returns PeelOnionFailure when a failure occurs trying to decrypt the onion payload.
+	#[test]
+	fn swap_peel_onion_failure() -> Result<(), Box<dyn std::error::Error>> {
+		let value: u64 = 200_000_000;
+		let fee: u64 = 50_000_000;
+		let blind = secp::random_secret();
+		let input_commit = secp::commit(value, &blind)?;
+
+		let server_key = secp::random_secret();
+		let hop_excess = secp::random_secret();
+		let proof = proof(value, fee, &blind, &hop_excess);
+
+		let wrong_server_key = secp::random_secret();
+		let hop = new_hop(&wrong_server_key, &hop_excess, fee, Some(proof));
+
+		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
+
+		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let result = server.swap(&onion, &comsig);
+
+		assert!(result.is_err());
+		assert_error_type!(result, SwapError::PeelOnionFailure(_));
+
+		Ok(())
+	}
+
+	/// Returns FeeTooLow when the minimum fee is not met.
+	#[test]
+	fn swap_fee_too_low() -> Result<(), Box<dyn std::error::Error>> {
+		let value: u64 = 200_000_000;
+		let fee: u64 = 1_000_000;
+		let blind = secp::random_secret();
+		let input_commit = secp::commit(value, &blind)?;
+
+		let server_key = secp::random_secret();
+		let hop_excess = secp::random_secret();
+		let proof = proof(value, fee, &blind, &hop_excess);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
+
+		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
+
+		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let result = server.swap(&onion, &comsig);
+		assert_eq!(
+			Err(SwapError::FeeTooLow {
+				minimum_fee: 12_500_000,
+				actual_fee: fee
+			}),
+			result
+		);
+
+		Ok(())
+	}
 }
