@@ -240,6 +240,22 @@ pub fn wallet_owner_secret_path(chain_type: &ChainTypes) -> PathBuf {
 	path
 }
 
+pub fn grin_node_url(chain_type: &ChainTypes) -> SocketAddr {
+	if *chain_type == ChainTypes::Testnet {
+		"127.0.0.1:13413".parse().unwrap()
+	} else {
+		"127.0.0.1:3413".parse().unwrap()
+	}
+}
+
+pub fn wallet_owner_url(chain_type: &ChainTypes) -> SocketAddr {
+	if *chain_type == ChainTypes::Testnet {
+		"127.0.0.1:13420".parse().unwrap()
+	} else {
+		"127.0.0.1:3420".parse().unwrap()
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
