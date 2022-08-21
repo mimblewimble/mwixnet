@@ -248,12 +248,8 @@ pub fn grin_node_url(chain_type: &ChainTypes) -> SocketAddr {
 	}
 }
 
-pub fn wallet_owner_url(chain_type: &ChainTypes) -> SocketAddr {
-	if *chain_type == ChainTypes::Testnet {
-		"127.0.0.1:13420".parse().unwrap()
-	} else {
-		"127.0.0.1:3420".parse().unwrap()
-	}
+pub fn wallet_owner_url(_chain_type: &ChainTypes) -> SocketAddr {
+	"127.0.0.1:3420".parse().unwrap()
 }
 
 #[cfg(test)]
