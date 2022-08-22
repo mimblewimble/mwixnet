@@ -38,6 +38,9 @@ pub enum ErrorKind {
 	/// Wallet error
 	#[fail(display = "wallet error: {}", _0)]
 	WalletError(crate::wallet::WalletError),
+	/// Wallet error
+	#[fail(display = "node error: {}", _0)]
+	NodeError(crate::node::NodeError),
 }
 
 impl std::error::Error for Error {}
@@ -142,6 +145,14 @@ impl From<crate::wallet::WalletError> for Error {
 	fn from(e: crate::wallet::WalletError) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::WalletError(e)),
+		}
+	}
+}
+
+impl From<crate::node::NodeError> for Error {
+	fn from(e: crate::node::NodeError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::NodeError(e)),
 		}
 	}
 }
