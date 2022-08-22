@@ -10,7 +10,6 @@ pub struct Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-pub type StdResult<T, E> = std::result::Result<T, E>;
 
 /// MWixnet error types
 #[derive(Clone, Debug, Eq, Fail, PartialEq)]
@@ -18,9 +17,6 @@ pub enum ErrorKind {
 	/// Error from secp256k1-zkp library
 	#[fail(display = "Secp Error")]
 	SecpError,
-	/// Invalid key length for MAC initialization
-	#[fail(display = "InvalidKeyLength")]
-	InvalidKeyLength,
 	/// Wraps an io error produced when reading or writing
 	#[fail(display = "IO Error: {}", _0)]
 	IOErr(String, io::ErrorKind),
@@ -78,10 +74,6 @@ impl Error {
 			inner: Context::new(kind),
 		}
 	}
-
-	pub fn message(&self) -> String {
-		format!("{}", self).into()
-	}
 }
 
 impl From<ErrorKind> for Error {
@@ -102,14 +94,6 @@ impl From<secp256k1zkp::Error> for Error {
 	fn from(_error: secp256k1zkp::Error) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::SecpError),
-		}
-	}
-}
-
-impl From<hmac::digest::InvalidLength> for Error {
-	fn from(_error: hmac::digest::InvalidLength) -> Error {
-		Error {
-			inner: Context::new(ErrorKind::InvalidKeyLength),
 		}
 	}
 }

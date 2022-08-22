@@ -170,7 +170,10 @@ pub fn commit(value: u64, blind: &SecretKey) -> Result<Commitment> {
 }
 
 /// Add a blinding factor to an existing Commitment
-pub fn add_excess(commitment: &Commitment, excess: &SecretKey) -> Result<Commitment> {
+pub fn add_excess(
+	commitment: &Commitment,
+	excess: &SecretKey,
+) -> std::result::Result<Commitment, secp256k1zkp::Error> {
 	let secp = Secp256k1::with_caps(ContextFlag::Commit);
 	let excess_commit: Commitment = secp.commit(0, excess.clone())?;
 
@@ -180,7 +183,10 @@ pub fn add_excess(commitment: &Commitment, excess: &SecretKey) -> Result<Commitm
 }
 
 /// Subtracts a value (v*H) from an existing commitment
-pub fn sub_value(commitment: &Commitment, value: u64) -> Result<Commitment> {
+pub fn sub_value(
+	commitment: &Commitment,
+	value: u64,
+) -> std::result::Result<Commitment, secp256k1zkp::Error> {
 	let secp = Secp256k1::with_caps(ContextFlag::Commit);
 	let neg_commit: Commitment = secp.commit(value, ZERO_KEY)?;
 	let sum = secp.commit_sum(vec![commitment.clone()], vec![neg_commit.clone()])?;

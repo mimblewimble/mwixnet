@@ -1,6 +1,6 @@
 use crate::config::ServerConfig;
 use crate::node::{self, GrinNode};
-use crate::onion::Onion;
+use crate::onion::{Onion, OnionError};
 use crate::secp::{ComSignature, Commitment, RangeProof, Secp256k1, SecretKey};
 use crate::wallet::{self, Wallet};
 
@@ -43,8 +43,8 @@ pub enum SwapError {
 	CoinNotFound { commit: Commitment },
 	#[error("Output {commit:?} is already in the swap list.")]
 	AlreadySwapped { commit: Commitment },
-	#[error("Failed to peel onion layer: {0}")]
-	PeelOnionFailure(String),
+	#[error("Failed to peel onion layer: {0:?}")]
+	PeelOnionFailure(OnionError),
 	#[error("Fee too low (expected >= {minimum_fee:?}, actual {actual_fee:?})")]
 	FeeTooLow { minimum_fee: u64, actual_fee: u64 },
 	#[error("{0}")]
@@ -126,7 +126,7 @@ impl Server for ServerImpl {
 
 		let peeled = onion
 			.peel_layer(&self.server_config.key)
-			.map_err(|e| SwapError::PeelOnionFailure(e.message()))?;
+			.map_err(|e| SwapError::PeelOnionFailure(e))?;
 
 		// Verify the fee meets the minimum
 		let fee: u64 = peeled.0.fee.into();
