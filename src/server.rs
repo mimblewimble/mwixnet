@@ -60,7 +60,7 @@ pub trait Server: Send + Sync {
 	/// and assemble the coinswap transaction, posting the transaction to the configured node.
 	///
 	/// Currently only a single mix node is used. Milestone 3 will include support for multiple mix nodes.
-	fn execute_round(&self) -> crate::error::Result<()>;
+	fn execute_round(&self) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 /// The standard MWixnet server implementation
@@ -168,7 +168,7 @@ impl Server for ServerImpl {
 		Ok(())
 	}
 
-	fn execute_round(&self) -> crate::error::Result<()> {
+	fn execute_round(&self) -> Result<(), Box<dyn std::error::Error>> {
 		let mut locked_state = self.submissions.lock().unwrap();
 		let next_block_height = self.node.get_chain_height()? + 1;
 
@@ -258,7 +258,7 @@ pub mod mock {
 			Ok(())
 		}
 
-		fn execute_round(&self) -> crate::error::Result<()> {
+		fn execute_round(&self) -> Result<(), Box<dyn std::error::Error>> {
 			Ok(())
 		}
 	}

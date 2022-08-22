@@ -2476,7 +2476,6 @@ dependencies = [
  "chacha20",
  "clap",
  "dirs",
- "failure",
  "futures 0.3.17",
  "grin_api 5.2.0-alpha.1 (git+https://github.com/mimblewimble/grin)",
  "grin_chain 5.2.0-alpha.1 (git+https://github.com/mimblewimble/grin)",

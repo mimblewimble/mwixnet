@@ -14,7 +14,6 @@ use tokio::runtime::Runtime;
 extern crate clap;
 
 mod config;
-mod error;
 mod node;
 mod onion;
 mod rpc;
