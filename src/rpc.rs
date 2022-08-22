@@ -6,7 +6,7 @@ use crate::server::{Server, ServerImpl, SwapError};
 use crate::wallet::Wallet;
 
 use grin_util::StopState;
-use jsonrpc_core::{Result, Value};
+use jsonrpc_core::Value;
 use jsonrpc_derive::rpc;
 use jsonrpc_http_server::jsonrpc_core::*;
 use jsonrpc_http_server::*;
@@ -25,11 +25,11 @@ pub struct SwapReq {
 #[rpc(server)]
 pub trait API {
 	#[rpc(name = "swap")]
-	fn swap(&self, swap: SwapReq) -> Result<Value>;
+	fn swap(&self, swap: SwapReq) -> jsonrpc_core::Result<Value>;
 
 	// milestone 3: Used by mwixnet coinswap servers to communicate with each other
-	// fn derive_outputs(&self, entries: Vec<Onion>) -> Result<Value>;
-	// fn derive_kernel(&self, tx: Tx) -> Result<Value>;
+	// fn derive_outputs(&self, entries: Vec<Onion>) -> jsonrpc_core::Result<Value>;
+	// fn derive_kernel(&self, tx: Tx) -> jsonrpc_core::Result<Value>;
 }
 
 #[derive(Clone)]
@@ -73,7 +73,7 @@ impl From<SwapError> for Error {
 
 impl API for RPCServer {
 	/// Implements the 'swap' API
-	fn swap(&self, swap: SwapReq) -> Result<Value> {
+	fn swap(&self, swap: SwapReq) -> jsonrpc_core::Result<Value> {
 		self.server
 			.lock()
 			.unwrap()
