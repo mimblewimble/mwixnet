@@ -163,7 +163,10 @@ pub fn read_secret_key<R: Reader>(reader: &mut R) -> std::result::Result<SecretK
 }
 
 /// Build a Pedersen Commitment using the provided value and blinding factor
-pub fn commit(value: u64, blind: &SecretKey) -> Result<Commitment> {
+pub fn commit(
+	value: u64,
+	blind: &SecretKey,
+) -> std::result::Result<Commitment, secp256k1zkp::Error> {
 	let secp = Secp256k1::with_caps(ContextFlag::Commit);
 	let commit = secp.commit(value, blind.clone())?;
 	Ok(commit)
@@ -194,7 +197,7 @@ pub fn sub_value(
 }
 
 /// Signs the message with the provided SecretKey
-pub fn sign(sk: &SecretKey, msg: &Message) -> Result<Signature> {
+pub fn sign(sk: &SecretKey, msg: &Message) -> std::result::Result<Signature, secp256k1zkp::Error> {
 	let secp = Secp256k1::with_caps(ContextFlag::Full);
 	let pubkey = PublicKey::from_secret_key(&secp, &sk)?;
 	let sig = aggsig::sign_single(&secp, &msg, &sk, None, None, None, Some(&pubkey), None)?;

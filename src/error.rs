@@ -12,7 +12,7 @@ pub struct Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// MWixnet error types
-#[derive(Clone, Debug, Eq, Fail, PartialEq)]
+#[derive(Debug, Fail)]
 pub enum ErrorKind {
 	/// Error from secp256k1-zkp library
 	#[fail(display = "Secp Error")]
@@ -20,9 +20,6 @@ pub enum ErrorKind {
 	/// Wraps an io error produced when reading or writing
 	#[fail(display = "IO Error: {}", _0)]
 	IOErr(String, io::ErrorKind),
-	/// Data wasn't in a consumable format
-	#[fail(display = "CorruptedData")]
-	CorruptedData,
 	/// Error from grin's api crate
 	#[fail(display = "GRIN API Error: {}", _0)]
 	GrinApiError(String),
@@ -38,6 +35,9 @@ pub enum ErrorKind {
 	/// Error from invalid signature
 	#[fail(display = "invalid signature")]
 	InvalidSigError,
+	/// Wallet error
+	#[fail(display = "wallet error: {}", _0)]
+	WalletError(crate::wallet::WalletError),
 }
 
 impl std::error::Error for Error {}
@@ -134,6 +134,14 @@ impl From<serde_json::Error> for Error {
 	fn from(e: serde_json::Error) -> Error {
 		Error {
 			inner: Context::new(ErrorKind::SerdeJsonError(e.to_string())),
+		}
+	}
+}
+
+impl From<crate::wallet::WalletError> for Error {
+	fn from(e: crate::wallet::WalletError) -> Error {
+		Error {
+			inner: Context::new(ErrorKind::WalletError(e)),
 		}
 	}
 }
