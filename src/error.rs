@@ -42,12 +42,6 @@ pub enum ErrorKind {
 	/// Error from invalid signature
 	#[fail(display = "invalid signature")]
 	InvalidSigError,
-	/// Error while saving config
-	#[fail(display = "save config error: {}", _0)]
-	SaveConfigError(String),
-	/// Error while loading config
-	#[fail(display = "load config error: {}", _0)]
-	LoadConfigError(String),
 }
 
 impl std::error::Error for Error {}
