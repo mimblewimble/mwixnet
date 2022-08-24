@@ -3,6 +3,7 @@ use node::HttpGrinNode;
 use wallet::HttpWallet;
 
 use clap::App;
+use grin_core::global::ChainTypes;
 use grin_util::{StopState, ZeroingString};
 use rpassword;
 use std::path::PathBuf;
@@ -32,11 +33,16 @@ fn main() {
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let yml = load_yaml!("../mwixnet.yml");
 	let args = App::from_yaml(yml).get_matches();
+	let chain_type = if args.is_present("testnet") {
+		ChainTypes::Testnet
+	} else {
+		ChainTypes::Mainnet
+	};
 
 	let config_path = match args.value_of("config_file") {
 		Some(path) => PathBuf::from(path),
 		None => {
-			let mut grin_path = config::get_grin_path();
+			let mut grin_path = config::get_grin_path(&chain_type);
 			grin_path.push("mwixnet-config.toml");
 			grin_path
 		}
@@ -64,15 +70,23 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			key: secp::random_secret(),
 			interval_s: round_time.unwrap_or(DEFAULT_INTERVAL),
 			addr: bind_addr.unwrap_or("0.0.0.0:3000").parse()?,
-			grin_node_url: grin_node_url.unwrap_or("127.0.0.1:3413").parse()?,
+			grin_node_url: match grin_node_url {
+				Some(u) => u.parse()?,
+				None => config::grin_node_url(&chain_type),
+			},
 			grin_node_secret_path: match grin_node_secret_path {
 				Some(p) => Some(p.to_owned()),
-				None => config::node_secret_path().to_str().map(|p| p.to_owned()),
+				None => config::node_secret_path(&chain_type)
+					.to_str()
+					.map(|p| p.to_owned()),
 			},
-			wallet_owner_url: wallet_owner_url.unwrap_or("127.0.0.1:3420").parse()?,
+			wallet_owner_url: match wallet_owner_url {
+				Some(u) => u.parse()?,
+				None => config::wallet_owner_url(&chain_type),
+			},
 			wallet_owner_secret_path: match wallet_owner_secret_path {
 				Some(p) => Some(p.to_owned()),
-				None => config::wallet_owner_secret_path()
+				None => config::wallet_owner_secret_path(&chain_type)
 					.to_str()
 					.map(|p| p.to_owned()),
 			},

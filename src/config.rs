@@ -2,6 +2,7 @@ use crate::error::{self, Result};
 use crate::secp::SecretKey;
 
 use core::num::NonZeroU32;
+use grin_core::global::ChainTypes;
 use grin_util::{file, ToHex, ZeroingString};
 use rand::{thread_rng, Rng};
 use ring::{aead, pbkdf2};
@@ -12,7 +13,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 const GRIN_HOME: &str = ".grin";
-const CHAIN_NAME: &str = "main";
 const NODE_API_SECRET_FILE_NAME: &str = ".api_secret";
 const WALLET_OWNER_API_SECRET_FILE_NAME: &str = ".owner_api_secret";
 
@@ -218,26 +218,38 @@ pub fn load_config(config_path: &PathBuf, password: &ZeroingString) -> Result<Se
 	})
 }
 
-pub fn get_grin_path() -> PathBuf {
+pub fn get_grin_path(chain_type: &ChainTypes) -> PathBuf {
 	let mut grin_path = match dirs::home_dir() {
 		Some(p) => p,
 		None => PathBuf::new(),
 	};
 	grin_path.push(GRIN_HOME);
-	grin_path.push(CHAIN_NAME);
+	grin_path.push(chain_type.shortname());
 	grin_path
 }
 
-pub fn node_secret_path() -> PathBuf {
-	let mut path = get_grin_path();
+pub fn node_secret_path(chain_type: &ChainTypes) -> PathBuf {
+	let mut path = get_grin_path(chain_type);
 	path.push(NODE_API_SECRET_FILE_NAME);
 	path
 }
 
-pub fn wallet_owner_secret_path() -> PathBuf {
-	let mut path = get_grin_path();
+pub fn wallet_owner_secret_path(chain_type: &ChainTypes) -> PathBuf {
+	let mut path = get_grin_path(chain_type);
 	path.push(WALLET_OWNER_API_SECRET_FILE_NAME);
 	path
+}
+
+pub fn grin_node_url(chain_type: &ChainTypes) -> SocketAddr {
+	if *chain_type == ChainTypes::Testnet {
+		"127.0.0.1:13413".parse().unwrap()
+	} else {
+		"127.0.0.1:3413".parse().unwrap()
+	}
+}
+
+pub fn wallet_owner_url(_chain_type: &ChainTypes) -> SocketAddr {
+	"127.0.0.1:3420".parse().unwrap()
 }
 
 #[cfg(test)]

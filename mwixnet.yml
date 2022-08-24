@@ -8,6 +8,10 @@ args:
       short: c
       long: config_file
       takes_value: true
+  - testnet:
+      help: Run grin against the Testnet (as opposed to mainnet)
+      long: testnet
+      takes_value: false
   - grin_node_url:
       help: Api address of running GRIN node on which to check inputs and post transactions
       short: n
