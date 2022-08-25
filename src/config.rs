@@ -1,4 +1,3 @@
-use crate::error::{self, Result};
 use crate::secp::SecretKey;
 
 use core::num::NonZeroU32;
@@ -11,6 +10,8 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::result::Result;
+use thiserror::Error;
 
 const GRIN_HOME: &str = ".grin";
 const NODE_API_SECRET_FILE_NAME: &str = ".api_secret";
@@ -45,6 +46,27 @@ impl ServerConfig {
 	}
 }
 
+/// Error types for saving or loading configs
+#[derive(Error, Debug)]
+pub enum ConfigError {
+	#[error("Error while writing config to file: {0:?}")]
+	FileWriteError(std::io::Error),
+	#[error("Error while encoding config as toml: {0:?}")]
+	EncodingError(toml::ser::Error),
+	#[error("Error while decoding toml config: {0:?}")]
+	DecodingError(toml::de::Error),
+	#[error("{0} not valid hex")]
+	InvalidHex(String),
+	#[error("Error decrypting seed: {0:?}")]
+	DecryptionError(ring::error::Unspecified),
+	#[error("Decrypted server key is invalid")]
+	InvalidServerKey,
+	#[error(
+		"Unable to read server config. Perform init-config or pass in config path.\nError: {0:?}"
+	)]
+	ReadConfigError(std::io::Error),
+}
+
 /// Encrypted server key, for storing on disk and decrypting with a password.
 /// Includes a salt used by key derivation and a nonce used when sealing the encrypted data.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -58,10 +80,7 @@ impl EncryptedServerKey {
 	/// Generates a random salt for pbkdf2 key derivation and a random nonce for aead sealing.
 	/// Then derives an encryption key from the password and salt. Finally, it encrypts and seals
 	/// the server key with chacha20-poly1305 using the derived key and random nonce.
-	pub fn from_secret_key(
-		server_key: &SecretKey,
-		password: &ZeroingString,
-	) -> Result<EncryptedServerKey> {
+	pub fn from_secret_key(server_key: &SecretKey, password: &ZeroingString) -> EncryptedServerKey {
 		let salt: [u8; 8] = thread_rng().gen();
 		let password = password.as_bytes();
 		let mut key = [0; 32];
@@ -85,28 +104,23 @@ impl EncryptedServerKey {
 				aad,
 				&mut enc_bytes,
 			)
-			.map_err(|e| {
-				error::ErrorKind::SaveConfigError(format!(
-					"Failure while encrypting server key: {}",
-					e
-				))
-			})?;
+			.unwrap();
 
-		Ok(EncryptedServerKey {
+		EncryptedServerKey {
 			encrypted_key: enc_bytes.to_hex(),
 			salt: salt.to_hex(),
 			nonce: nonce.to_hex(),
-		})
+		}
 	}
 
 	/// Decrypt the server secret key using the provided password.
-	pub fn decrypt(&self, password: &str) -> Result<SecretKey> {
+	pub fn decrypt(&self, password: &str) -> Result<SecretKey, ConfigError> {
 		let mut encrypted_seed = grin_util::from_hex(&self.encrypted_key.clone())
-			.map_err(|_| error::ErrorKind::LoadConfigError("Seed not valid hex".to_string()))?;
+			.map_err(|_| ConfigError::InvalidHex("Seed".to_string()))?;
 		let salt = grin_util::from_hex(&self.salt.clone())
-			.map_err(|_| error::ErrorKind::LoadConfigError("Salt not valid hex".to_string()))?;
+			.map_err(|_| ConfigError::InvalidHex("Salt".to_string()))?;
 		let nonce = grin_util::from_hex(&self.nonce.clone())
-			.map_err(|_| error::ErrorKind::LoadConfigError("Nonce not valid hex".to_string()))?;
+			.map_err(|_| ConfigError::InvalidHex("Nonce".to_string()))?;
 		let password = password.as_bytes();
 		let mut key = [0; 32];
 		pbkdf2::derive(
@@ -128,18 +142,15 @@ impl EncryptedServerKey {
 				aad,
 				&mut encrypted_seed,
 			)
-			.map_err(|e| {
-				error::ErrorKind::LoadConfigError(format!("Error decrypting seed: {}", e))
-			})?;
+			.map_err(|e| ConfigError::DecryptionError(e))?;
 
 		for _ in 0..aead::AES_256_GCM.tag_len() {
 			encrypted_seed.pop();
 		}
 
 		let secp = secp256k1zkp::Secp256k1::new();
-		let decrypted = SecretKey::from_slice(&secp, &encrypted_seed).map_err(|_| {
-			error::ErrorKind::LoadConfigError("Decrypted key not valid".to_string())
-		})?;
+		let decrypted = SecretKey::from_slice(&secp, &encrypted_seed)
+			.map_err(|_| ConfigError::InvalidServerKey)?;
 		Ok(decrypted)
 	}
 }
@@ -163,8 +174,8 @@ pub fn write_config(
 	config_path: &PathBuf,
 	server_config: &ServerConfig,
 	password: &ZeroingString,
-) -> Result<()> {
-	let encrypted = EncryptedServerKey::from_secret_key(&server_config.key, &password)?;
+) -> Result<(), ConfigError> {
+	let encrypted = EncryptedServerKey::from_secret_key(&server_config.key, &password);
 
 	let raw_config = RawConfig {
 		encrypted_key: encrypted.encrypted_key,
@@ -177,28 +188,25 @@ pub fn write_config(
 		wallet_owner_url: server_config.wallet_owner_url,
 		wallet_owner_secret_path: server_config.wallet_owner_secret_path.clone(),
 	};
-	let encoded: String = toml::to_string(&raw_config).map_err(|e| {
-		error::ErrorKind::SaveConfigError(format!("Error while encoding config as toml: {}", e))
-	})?;
+	let encoded: String =
+		toml::to_string(&raw_config).map_err(|e| ConfigError::EncodingError(e))?;
 
-	let mut file = File::create(config_path)?;
-	file.write_all(encoded.as_bytes()).map_err(|e| {
-		error::ErrorKind::SaveConfigError(format!("Error while writing config to file: {}", e))
-	})?;
+	let mut file = File::create(config_path).map_err(|e| ConfigError::FileWriteError(e))?;
+	file.write_all(encoded.as_bytes())
+		.map_err(|e| ConfigError::FileWriteError(e))?;
 
 	Ok(())
 }
 
 /// Reads the server config from the config_path given and decrypts it with the provided password.
-pub fn load_config(config_path: &PathBuf, password: &ZeroingString) -> Result<ServerConfig> {
-	let contents = std::fs::read_to_string(config_path).map_err(|e| {
-		error::ErrorKind::LoadConfigError(format!(
-			"Unable to read server config. Perform init-config or pass in config path.\nError: {}",
-			e
-		))
-	})?;
+pub fn load_config(
+	config_path: &PathBuf,
+	password: &ZeroingString,
+) -> Result<ServerConfig, ConfigError> {
+	let contents =
+		std::fs::read_to_string(config_path).map_err(|e| ConfigError::ReadConfigError(e))?;
 	let raw_config: RawConfig =
-		toml::from_str(&contents).map_err(|e| error::ErrorKind::LoadConfigError(e.to_string()))?;
+		toml::from_str(&contents).map_err(|e| ConfigError::DecodingError(e))?;
 
 	let encrypted_key = EncryptedServerKey {
 		encrypted_key: raw_config.encrypted_key,
@@ -261,7 +269,7 @@ mod tests {
 	fn server_key_encrypt() {
 		let password = ZeroingString::from("password");
 		let server_key = secp::random_secret();
-		let mut enc_key = EncryptedServerKey::from_secret_key(&server_key, &password).unwrap();
+		let mut enc_key = EncryptedServerKey::from_secret_key(&server_key, &password);
 		let decrypted_key = enc_key.decrypt(&password).unwrap();
 		assert_eq!(server_key, decrypted_key);
 

@@ -1,4 +1,3 @@
-use crate::error::{ErrorKind, Result};
 use crate::secp;
 
 use grin_api::client;
@@ -15,10 +14,38 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use thiserror::Error;
 
 pub trait Wallet: Send + Sync {
 	/// Builds an output for the wallet with the provided amount.
-	fn build_output(&self, amount: u64) -> Result<(BlindingFactor, Output)>;
+	fn build_output(&self, amount: u64) -> Result<(BlindingFactor, Output), WalletError>;
+}
+
+/// Error types for interacting with wallets
+#[derive(Error, Debug)]
+pub enum WalletError {
+	#[error("Error building kernel's fee fields: {0:?}")]
+	KernelFeeError(grin_core::core::transaction::Error),
+	#[error("Error computing kernel's excess: {0:?}")]
+	KernelExcessError(secp256k1zkp::Error),
+	#[error("Error computing kernel's signature message: {0:?}")]
+	KernelSigMessageError(grin_core::core::transaction::Error),
+	#[error("Error signing kernel: {0:?}")]
+	KernelSigError(secp256k1zkp::Error),
+	#[error("Built kernel failed to verify: {0:?}")]
+	KernelVerifyError(grin_core::core::transaction::Error),
+	#[error("Output blinding factor is invalid: {0:?}")]
+	OutputBlindError(secp256k1zkp::Error),
+	#[error("Error encrypting request: {0:?}")]
+	EncryptRequestError(grin_wallet_libwallet::Error),
+	#[error("Error decrypting response: {0:?}")]
+	DecryptResponseError(grin_wallet_libwallet::Error),
+	#[error("Error decoding JSON response: {0:?}")]
+	DecodeResponseError(serde_json::Error),
+	#[error("JSON-RPC API communication error: {0:?}")]
+	ApiCommError(grin_api::Error),
+	#[error("Error decoding JSON-RPC response: {0:?}")]
+	ResponseParseError(grin_api::json_rpc::Error),
 }
 
 /// Builds and verifies a 'Transaction' using the provided components.
@@ -29,7 +56,7 @@ pub fn assemble_tx(
 	fee_base: u64,
 	total_fee: u64,
 	excesses: &Vec<SecretKey>,
-) -> Result<Transaction> {
+) -> Result<Transaction, WalletError> {
 	let secp = Secp256k1::with_caps(ContextFlag::Commit);
 	let txn_inputs = Inputs::from(inputs.as_slice());
 	let mut txn_outputs = outputs.clone();
@@ -52,10 +79,8 @@ pub fn assemble_tx(
 		let wallet_output = wallet.build_output(amount)?;
 		txn_outputs.push(wallet_output.1);
 
-		let output_excess = wallet_output
-			.0
-			.secret_key(&secp)
-			.map_err(|_| ErrorKind::CorruptedData)?;
+		let output_excess = SecretKey::from_slice(&secp, &wallet_output.0.as_ref())
+			.map_err(WalletError::OutputBlindError)?;
 		txn_excesses.push(output_excess);
 	}
 
@@ -63,16 +88,20 @@ pub fn assemble_tx(
 	let offset = secp::random_secret();
 
 	// calculate kernel excess
-	let kern_excess = secp.blind_sum(txn_excesses, vec![offset.clone()])?;
+	let kern_excess = secp
+		.blind_sum(txn_excesses, vec![offset.clone()])
+		.map_err(WalletError::KernelExcessError)?;
 
 	// build and verify kernel
 	let mut kernel = TxKernel::with_features(KernelFeatures::Plain {
-		fee: FeeFields::new(0, kernel_fee).unwrap(),
+		fee: FeeFields::new(0, kernel_fee).map_err(WalletError::KernelFeeError)?,
 	});
-	let msg = kernel.msg_to_sign()?;
-	kernel.excess = secp::commit(0, &kern_excess)?;
-	kernel.excess_sig = secp::sign(&kern_excess, &msg)?;
-	kernel.verify()?;
+	let msg = kernel
+		.msg_to_sign()
+		.map_err(WalletError::KernelSigMessageError)?;
+	kernel.excess = secp::commit(0, &kern_excess).map_err(WalletError::KernelExcessError)?;
+	kernel.excess_sig = secp::sign(&kern_excess, &msg).map_err(WalletError::KernelSigError)?;
+	kernel.verify().map_err(WalletError::KernelVerifyError)?;
 
 	// assemble the transaction
 	let tx = Transaction::new(txn_inputs, &txn_outputs, &[kernel])
@@ -106,7 +135,7 @@ impl HttpWallet {
 		wallet_owner_url: &SocketAddr,
 		wallet_owner_secret: &Option<String>,
 		wallet_pass: &ZeroingString,
-	) -> Result<HttpWallet> {
+	) -> Result<HttpWallet, WalletError> {
 		println!("Opening wallet at {}", wallet_owner_url);
 		let shared_key = HttpWallet::init_secure_api(&wallet_owner_url, &wallet_owner_secret)?;
 
@@ -134,10 +163,10 @@ impl HttpWallet {
 	fn init_secure_api(
 		wallet_owner_url: &SocketAddr,
 		wallet_owner_secret: &Option<String>,
-	) -> Result<SecretKey> {
+	) -> Result<SecretKey, WalletError> {
 		let secp = Secp256k1::new();
 		let ephemeral_sk = secp::random_secret();
-		let ephemeral_pk = PublicKey::from_secret_key(&secp, &ephemeral_sk)?;
+		let ephemeral_pk = PublicKey::from_secret_key(&secp, &ephemeral_sk).unwrap();
 		let init_params = json!({
 			"ecdh_pubkey": ephemeral_pk.serialize_vec(&secp, true).to_hex()
 		});
@@ -151,10 +180,10 @@ impl HttpWallet {
 
 		let shared_key = {
 			let mut shared_pubkey = response_pk.ecdh_pubkey.clone();
-			shared_pubkey.mul_assign(&secp, &ephemeral_sk)?;
+			shared_pubkey.mul_assign(&secp, &ephemeral_sk).unwrap();
 
 			let x_coord = shared_pubkey.serialize_vec(&secp, true);
-			SecretKey::from_slice(&secp, &x_coord[1..])?
+			SecretKey::from_slice(&secp, &x_coord[1..]).unwrap()
 		};
 
 		Ok(shared_key)
@@ -166,7 +195,7 @@ impl HttpWallet {
 		method: &str,
 		params: &serde_json::Value,
 		shared_key: &SecretKey,
-	) -> Result<D> {
+	) -> Result<D, WalletError> {
 		let url = format!("http://{}{}", wallet_owner_url, ENDPOINT);
 		let req = json!({
 			"method": method,
@@ -174,15 +203,21 @@ impl HttpWallet {
 			"id": JsonId::IntId(1),
 			"jsonrpc": "2.0",
 		});
-		let enc_req = EncryptedRequest::from_json(&JsonId::IntId(1), &req, &shared_key)?;
+		let enc_req = EncryptedRequest::from_json(&JsonId::IntId(1), &req, &shared_key)
+			.map_err(WalletError::EncryptRequestError)?;
 		let res = client::post::<EncryptedRequest, EncryptedResponse>(
 			url.as_str(),
 			wallet_owner_secret.clone(),
 			&enc_req,
-		)?;
-		let decrypted = res.decrypt(&shared_key)?;
-		let response: Response = serde_json::from_value(decrypted.clone())?;
-		let parsed = serde_json::from_value(response.result.unwrap().get("Ok").unwrap().clone())?;
+		)
+		.map_err(WalletError::ApiCommError)?;
+		let decrypted = res
+			.decrypt(&shared_key)
+			.map_err(WalletError::DecryptResponseError)?;
+		let response: Response =
+			serde_json::from_value(decrypted).map_err(WalletError::DecodeResponseError)?;
+		let ok = response.result.unwrap().get("Ok").unwrap().clone();
+		let parsed = serde_json::from_value(ok).map_err(WalletError::DecodeResponseError)?;
 		Ok(parsed)
 	}
 
@@ -191,12 +226,16 @@ impl HttpWallet {
 		wallet_owner_secret: &Option<String>,
 		method: &str,
 		params: &serde_json::Value,
-	) -> Result<D> {
+	) -> Result<D, WalletError> {
 		let url = format!("http://{}{}", wallet_owner_url, ENDPOINT);
 		let req = build_request(method, params);
 		let res =
-			client::post::<Request, Response>(url.as_str(), wallet_owner_secret.clone(), &req)?;
-		let parsed = res.clone().into_result()?;
+			client::post::<Request, Response>(url.as_str(), wallet_owner_secret.clone(), &req)
+				.map_err(WalletError::ApiCommError)?;
+		let parsed = res
+			.clone()
+			.into_result()
+			.map_err(WalletError::ResponseParseError)?;
 		Ok(parsed)
 	}
 }
@@ -213,7 +252,7 @@ pub struct OutputWithBlind {
 
 impl Wallet for HttpWallet {
 	/// Builds an 'Output' for the wallet using the 'build_output' RPC API.
-	fn build_output(&self, amount: u64) -> Result<(BlindingFactor, Output)> {
+	fn build_output(&self, amount: u64) -> Result<(BlindingFactor, Output), WalletError> {
 		let req_json = json!({
 			"token": self.token.keychain_mask.clone().unwrap().0,
 			"features": "Plain",
@@ -232,8 +271,7 @@ impl Wallet for HttpWallet {
 
 #[cfg(test)]
 pub mod mock {
-	use super::Wallet;
-	use crate::error::Result;
+	use super::{Wallet, WalletError};
 	use crate::secp;
 
 	use grin_core::core::{Output, OutputFeatures};
@@ -246,10 +284,10 @@ pub mod mock {
 
 	impl Wallet for MockWallet {
 		/// Builds an 'Output' for the wallet using the 'build_output' RPC API.
-		fn build_output(&self, amount: u64) -> Result<(BlindingFactor, Output)> {
+		fn build_output(&self, amount: u64) -> Result<(BlindingFactor, Output), WalletError> {
 			let secp = Secp256k1::new();
 			let blind = secp::random_secret();
-			let commit = secp::commit(amount, &blind)?;
+			let commit = secp::commit(amount, &blind).unwrap();
 			let proof = secp.bullet_proof(
 				amount,
 				blind.clone(),

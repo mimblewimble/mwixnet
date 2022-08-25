@@ -1,4 +1,3 @@
-use crate::error::{ErrorKind, Result};
 use crate::secp::Commitment;
 
 use grin_api::client;
@@ -11,20 +10,32 @@ use grin_util::ToHex;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use thiserror::Error;
 
 pub trait GrinNode: Send + Sync {
 	/// Retrieves the unspent output with a matching commitment
-	fn get_utxo(&self, output_commit: &Commitment) -> Result<Option<OutputPrintable>>;
+	fn get_utxo(&self, output_commit: &Commitment) -> Result<Option<OutputPrintable>, NodeError>;
 
 	/// Gets the height of the chain tip
-	fn get_chain_height(&self) -> Result<u64>;
+	fn get_chain_height(&self) -> Result<u64, NodeError>;
 
 	/// Posts a transaction to the grin node
-	fn post_tx(&self, tx: &Transaction) -> Result<()>;
+	fn post_tx(&self, tx: &Transaction) -> Result<(), NodeError>;
+}
+
+/// Error types for interacting with nodes
+#[derive(Error, Debug)]
+pub enum NodeError {
+	#[error("Error decoding JSON response: {0:?}")]
+	DecodeResponseError(serde_json::Error),
+	#[error("JSON-RPC API communication error: {0:?}")]
+	ApiCommError(grin_api::Error),
+	#[error("Error decoding JSON-RPC response: {0:?}")]
+	ResponseParseError(grin_api::json_rpc::Error),
 }
 
 /// Checks if a commitment is in the UTXO set
-pub fn is_unspent(node: &Arc<dyn GrinNode>, commit: &Commitment) -> Result<bool> {
+pub fn is_unspent(node: &Arc<dyn GrinNode>, commit: &Commitment) -> Result<bool, NodeError> {
 	let utxo = node.get_utxo(&commit)?;
 	Ok(utxo.is_some())
 }
@@ -34,7 +45,7 @@ pub fn is_spendable(
 	node: &Arc<dyn GrinNode>,
 	output_commit: &Commitment,
 	next_block_height: u64,
-) -> Result<bool> {
+) -> Result<bool, NodeError> {
 	let output = node.get_utxo(&output_commit)?;
 	if let Some(out) = output {
 		let is_coinbase = match out.output_type {
@@ -59,7 +70,10 @@ pub fn is_spendable(
 }
 
 /// Builds an input for an unspent output commitment
-pub fn build_input(node: &Arc<dyn GrinNode>, output_commit: &Commitment) -> Result<Option<Input>> {
+pub fn build_input(
+	node: &Arc<dyn GrinNode>,
+	output_commit: &Commitment,
+) -> Result<Option<Input>, NodeError> {
 	let output = node.get_utxo(&output_commit)?;
 
 	if let Some(out) = output {
@@ -96,18 +110,22 @@ impl HttpGrinNode {
 		&self,
 		method: &str,
 		params: &serde_json::Value,
-	) -> Result<D> {
+	) -> Result<D, NodeError> {
 		let url = format!("http://{}{}", self.node_url, ENDPOINT);
 		let req = build_request(method, params);
 		let res =
-			client::post::<Request, Response>(url.as_str(), self.node_api_secret.clone(), &req)?;
-		let parsed = res.clone().into_result()?;
+			client::post::<Request, Response>(url.as_str(), self.node_api_secret.clone(), &req)
+				.map_err(NodeError::ApiCommError)?;
+		let parsed = res
+			.clone()
+			.into_result()
+			.map_err(NodeError::ResponseParseError)?;
 		Ok(parsed)
 	}
 }
 
 impl GrinNode for HttpGrinNode {
-	fn get_utxo(&self, output_commit: &Commitment) -> Result<Option<OutputPrintable>> {
+	fn get_utxo(&self, output_commit: &Commitment) -> Result<Option<OutputPrintable>, NodeError> {
 		let commits: Vec<String> = vec![output_commit.to_hex()];
 		let start_height: Option<u64> = None;
 		let end_height: Option<u64> = None;
@@ -129,17 +147,17 @@ impl GrinNode for HttpGrinNode {
 		Ok(Some(outputs[0].clone()))
 	}
 
-	fn get_chain_height(&self) -> Result<u64> {
+	fn get_chain_height(&self) -> Result<u64, NodeError> {
 		let params = json!([]);
 		let tip_json = self.send_json_request::<serde_json::Value>("get_tip", &params)?;
 
-		let tip: Result<Tip> = serde_json::from_value(tip_json["Ok"].clone())
-			.map_err(|e| ErrorKind::SerdeJsonError(e.to_string()).into());
+		let tip = serde_json::from_value::<Tip>(tip_json["Ok"].clone())
+			.map_err(NodeError::DecodeResponseError)?;
 
-		Ok(tip?.height)
+		Ok(tip.height)
 	}
 
-	fn post_tx(&self, tx: &Transaction) -> Result<()> {
+	fn post_tx(&self, tx: &Transaction) -> Result<(), NodeError> {
 		let params = json!([tx, true]);
 		self.send_json_request::<serde_json::Value>("push_transaction", &params)?;
 		Ok(())
@@ -148,8 +166,7 @@ impl GrinNode for HttpGrinNode {
 
 #[cfg(test)]
 pub mod mock {
-	use super::GrinNode;
-	use crate::error::Result;
+	use super::{GrinNode, NodeError};
 	use crate::secp::Commitment;
 
 	use grin_api::{OutputPrintable, OutputType};
@@ -198,7 +215,10 @@ pub mod mock {
 	}
 
 	impl GrinNode for MockGrinNode {
-		fn get_utxo(&self, output_commit: &Commitment) -> Result<Option<OutputPrintable>> {
+		fn get_utxo(
+			&self,
+			output_commit: &Commitment,
+		) -> Result<Option<OutputPrintable>, NodeError> {
 			if let Some(utxo) = self.utxos.get(&output_commit) {
 				return Ok(Some(utxo.clone()));
 			}
@@ -206,11 +226,11 @@ pub mod mock {
 			Ok(None)
 		}
 
-		fn get_chain_height(&self) -> Result<u64> {
+		fn get_chain_height(&self) -> Result<u64, NodeError> {
 			Ok(100)
 		}
 
-		fn post_tx(&self, tx: &Transaction) -> Result<()> {
+		fn post_tx(&self, tx: &Transaction) -> Result<(), NodeError> {
 			let mut write = self.txns_posted.write().unwrap();
 			write.push(tx.clone());
 			Ok(())

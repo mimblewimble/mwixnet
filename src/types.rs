@@ -1,4 +1,3 @@
-use crate::error::{Result, StdResult};
 use crate::secp::{self, RangeProof, SecretKey};
 
 use grin_core::core::FeeFields;
@@ -7,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u8 = 0;
 
+// todo: Belongs in Onion
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Payload {
 	pub excess: SecretKey,
@@ -15,13 +15,13 @@ pub struct Payload {
 }
 
 impl Payload {
-	pub fn deserialize(bytes: &Vec<u8>) -> Result<Payload> {
+	pub fn deserialize(bytes: &Vec<u8>) -> Result<Payload, ser::Error> {
 		let payload: Payload = ser::deserialize_default(&mut &bytes[..])?;
 		Ok(payload)
 	}
 
 	#[cfg(test)]
-	pub fn serialize(&self) -> Result<Vec<u8>> {
+	pub fn serialize(&self) -> Result<Vec<u8>, ser::Error> {
 		let mut vec = vec![];
 		ser::serialize_default(&mut vec, &self)?;
 		Ok(vec)
@@ -29,7 +29,7 @@ impl Payload {
 }
 
 impl Readable for Payload {
-	fn read<R: Reader>(reader: &mut R) -> StdResult<Payload, ser::Error> {
+	fn read<R: Reader>(reader: &mut R) -> Result<Payload, ser::Error> {
 		let version = reader.read_u8()?;
 		if version != CURRENT_VERSION {
 			return Err(ser::Error::UnsupportedProtocolVersion);
@@ -53,7 +53,7 @@ impl Readable for Payload {
 }
 
 impl Writeable for Payload {
-	fn write<W: Writer>(&self, writer: &mut W) -> StdResult<(), ser::Error> {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ser::Error> {
 		writer.write_u8(CURRENT_VERSION)?;
 		writer.write_fixed_bytes(&self.excess)?;
 		writer.write_u64(self.fee.into())?;

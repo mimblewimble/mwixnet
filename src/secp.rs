@@ -8,12 +8,11 @@ pub use secp256k1zkp::key::{PublicKey, SecretKey, ZERO_KEY};
 pub use secp256k1zkp::pedersen::{Commitment, RangeProof};
 pub use secp256k1zkp::{ContextFlag, Message, Secp256k1, Signature};
 
-use crate::error::{Error, ErrorKind, Result};
-
 use blake2::blake2b::Blake2b;
 use byteorder::{BigEndian, ByteOrder};
 use grin_core::ser::{self, Readable, Reader, Writeable, Writer};
 use secp256k1zkp::rand::thread_rng;
+use thiserror::Error;
 
 /// A generalized Schnorr signature with a pedersen commitment value & blinding factors as the keys
 #[derive(Clone)]
@@ -21,6 +20,21 @@ pub struct ComSignature {
 	pub_nonce: Commitment,
 	s: SecretKey,
 	t: SecretKey,
+}
+
+/// Error types for Commitment Signatures
+#[derive(Error, Debug)]
+pub enum ComSigError {
+	#[error("Commitment signature is invalid")]
+	InvalidSig,
+	#[error("Secp256k1zkp error: {0:?}")]
+	Secp256k1zkp(secp256k1zkp::Error),
+}
+
+impl From<secp256k1zkp::Error> for ComSigError {
+	fn from(err: secp256k1zkp::Error) -> ComSigError {
+		ComSigError::Secp256k1zkp(err)
+	}
 }
 
 impl ComSignature {
@@ -33,7 +47,11 @@ impl ComSignature {
 	}
 
 	#[allow(dead_code)]
-	pub fn sign(amount: u64, blind: &SecretKey, msg: &Vec<u8>) -> Result<ComSignature> {
+	pub fn sign(
+		amount: u64,
+		blind: &SecretKey,
+		msg: &Vec<u8>,
+	) -> Result<ComSignature, ComSigError> {
 		let secp = Secp256k1::with_caps(ContextFlag::Commit);
 
 		let mut amt_bytes = [0; 32];
@@ -62,7 +80,7 @@ impl ComSignature {
 	}
 
 	#[allow(non_snake_case)]
-	pub fn verify(&self, commit: &Commitment, msg: &Vec<u8>) -> Result<()> {
+	pub fn verify(&self, commit: &Commitment, msg: &Vec<u8>) -> Result<(), ComSigError> {
 		let secp = Secp256k1::with_caps(ContextFlag::Commit);
 
 		let S1 = secp.commit_blind(self.s.clone(), self.t.clone())?;
@@ -75,7 +93,7 @@ impl ComSignature {
 		let S2 = secp.commit_sum(commits, Vec::new())?;
 
 		if S1 != S2 {
-			return Err(Error::new(ErrorKind::InvalidSigError));
+			return Err(ComSigError::InvalidSig);
 		}
 
 		Ok(())
@@ -86,7 +104,7 @@ impl ComSignature {
 		commit: &Commitment,
 		nonce_commit: &Commitment,
 		msg: &Vec<u8>,
-	) -> Result<SecretKey> {
+	) -> Result<SecretKey, ComSigError> {
 		let mut challenge_hasher = Blake2b::new(32);
 		challenge_hasher.update(&commit.0);
 		challenge_hasher.update(&nonce_commit.0);
@@ -131,7 +149,7 @@ pub mod comsig_serde {
 
 #[allow(non_snake_case)]
 impl Readable for ComSignature {
-	fn read<R: Reader>(reader: &mut R) -> std::result::Result<Self, ser::Error> {
+	fn read<R: Reader>(reader: &mut R) -> Result<Self, ser::Error> {
 		let R = Commitment::read(reader)?;
 		let s = read_secret_key(reader)?;
 		let t = read_secret_key(reader)?;
@@ -140,7 +158,7 @@ impl Readable for ComSignature {
 }
 
 impl Writeable for ComSignature {
-	fn write<W: Writer>(&self, writer: &mut W) -> std::result::Result<(), ser::Error> {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ser::Error> {
 		writer.write_fixed_bytes(self.pub_nonce.0)?;
 		writer.write_fixed_bytes(self.s.0)?;
 		writer.write_fixed_bytes(self.t.0)?;
@@ -155,7 +173,7 @@ pub fn random_secret() -> SecretKey {
 }
 
 /// Deserialize a SecretKey from a Reader
-pub fn read_secret_key<R: Reader>(reader: &mut R) -> std::result::Result<SecretKey, ser::Error> {
+pub fn read_secret_key<R: Reader>(reader: &mut R) -> Result<SecretKey, ser::Error> {
 	let buf = reader.read_fixed_bytes(SECRET_KEY_SIZE)?;
 	let secp = Secp256k1::with_caps(ContextFlag::None);
 	let pk = SecretKey::from_slice(&secp, &buf).map_err(|_| ser::Error::CorruptedData)?;
@@ -163,14 +181,17 @@ pub fn read_secret_key<R: Reader>(reader: &mut R) -> std::result::Result<SecretK
 }
 
 /// Build a Pedersen Commitment using the provided value and blinding factor
-pub fn commit(value: u64, blind: &SecretKey) -> Result<Commitment> {
+pub fn commit(value: u64, blind: &SecretKey) -> Result<Commitment, secp256k1zkp::Error> {
 	let secp = Secp256k1::with_caps(ContextFlag::Commit);
 	let commit = secp.commit(value, blind.clone())?;
 	Ok(commit)
 }
 
 /// Add a blinding factor to an existing Commitment
-pub fn add_excess(commitment: &Commitment, excess: &SecretKey) -> Result<Commitment> {
+pub fn add_excess(
+	commitment: &Commitment,
+	excess: &SecretKey,
+) -> Result<Commitment, secp256k1zkp::Error> {
 	let secp = Secp256k1::with_caps(ContextFlag::Commit);
 	let excess_commit: Commitment = secp.commit(0, excess.clone())?;
 
@@ -180,7 +201,7 @@ pub fn add_excess(commitment: &Commitment, excess: &SecretKey) -> Result<Commitm
 }
 
 /// Subtracts a value (v*H) from an existing commitment
-pub fn sub_value(commitment: &Commitment, value: u64) -> Result<Commitment> {
+pub fn sub_value(commitment: &Commitment, value: u64) -> Result<Commitment, secp256k1zkp::Error> {
 	let secp = Secp256k1::with_caps(ContextFlag::Commit);
 	let neg_commit: Commitment = secp.commit(value, ZERO_KEY)?;
 	let sum = secp.commit_sum(vec![commitment.clone()], vec![neg_commit.clone()])?;
@@ -188,7 +209,7 @@ pub fn sub_value(commitment: &Commitment, value: u64) -> Result<Commitment> {
 }
 
 /// Signs the message with the provided SecretKey
-pub fn sign(sk: &SecretKey, msg: &Message) -> Result<Signature> {
+pub fn sign(sk: &SecretKey, msg: &Message) -> Result<Signature, secp256k1zkp::Error> {
 	let secp = Secp256k1::with_caps(ContextFlag::Full);
 	let pubkey = PublicKey::from_secret_key(&secp, &sk)?;
 	let sig = aggsig::sign_single(&secp, &msg, &sk, None, None, None, Some(&pubkey), None)?;
@@ -197,15 +218,14 @@ pub fn sign(sk: &SecretKey, msg: &Message) -> Result<Signature> {
 
 #[cfg(test)]
 mod tests {
-	use super::{ComSignature, ContextFlag, Secp256k1, SecretKey};
-	use crate::error::Result;
+	use super::{ComSigError, ComSignature, ContextFlag, Secp256k1, SecretKey};
 
 	use rand::Rng;
 	use secp256k1zkp::rand::{thread_rng, RngCore};
 
 	/// Test signing and verification of ComSignatures
 	#[test]
-	fn verify_comsig() -> Result<()> {
+	fn verify_comsig() -> Result<(), ComSigError> {
 		let secp = Secp256k1::with_caps(ContextFlag::Commit);
 
 		let amount = thread_rng().next_u64();
