@@ -1,5 +1,6 @@
 use crate::onion::Onion;
 use crate::secp::{self, Commitment, RangeProof, SecretKey};
+use crate::types::{read_optional, write_optional};
 
 use grin_core::core::Input;
 use grin_core::ser::{self, ProtocolVersion, Readable, Reader, Writeable, Writer};
@@ -36,16 +37,7 @@ impl Writeable for SwapData {
 		writer.write_u8(CURRENT_VERSION)?;
 		writer.write_fixed_bytes(&self.excess)?;
 		writer.write_fixed_bytes(&self.output_commit)?;
-
-		// todo: duplicated in payload. Can we impl Writeable for Option<RangeProof>?
-		match &self.rangeproof {
-			Some(proof) => {
-				writer.write_u8(1)?;
-				proof.write(writer)?;
-			}
-			None => writer.write_u8(0)?,
-		};
-
+		write_optional(writer, &self.rangeproof)?;
 		self.input.write(writer)?;
 		writer.write_u64(self.fee.into())?;
 		self.onion.write(writer)?;
@@ -63,15 +55,10 @@ impl Readable for SwapData {
 
 		let excess = secp::read_secret_key(reader)?;
 		let output_commit = Commitment::read(reader)?;
-		let rangeproof = if reader.read_u8()? == 0 {
-			None
-		} else {
-			Some(RangeProof::read(reader)?)
-		};
+		let rangeproof = read_optional(reader)?;
 		let input = Input::read(reader)?;
 		let fee = reader.read_u64()?;
 		let onion = Onion::read(reader)?;
-
 		Ok(SwapData {
 			excess,
 			output_commit,

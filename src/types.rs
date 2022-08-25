@@ -6,6 +6,31 @@ use serde::{Deserialize, Serialize};
 
 const CURRENT_VERSION: u8 = 0;
 
+/// Writes an optional value as '1' + value if Some, or '0' if None
+pub fn write_optional<O: Writeable, W: Writer>(
+	writer: &mut W,
+	o: &Option<O>,
+) -> Result<(), ser::Error> {
+	match &o {
+		Some(o) => {
+			writer.write_u8(1)?;
+			o.write(writer)?;
+		}
+		None => writer.write_u8(0)?,
+	};
+	Ok(())
+}
+
+/// Reads an optional value as '1' + value if Some, or '0' if None
+pub fn read_optional<O: Readable, R: Reader>(reader: &mut R) -> Result<Option<O>, ser::Error> {
+	let o = if reader.read_u8()? == 0 {
+		None
+	} else {
+		Some(O::read(reader)?)
+	};
+	Ok(o)
+}
+
 // todo: Belongs in Onion
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Payload {
@@ -37,18 +62,12 @@ impl Readable for Payload {
 
 		let excess = secp::read_secret_key(reader)?;
 		let fee = FeeFields::try_from(reader.read_u64()?).map_err(|_| ser::Error::CorruptedData)?;
-		let rangeproof = if reader.read_u8()? == 0 {
-			None
-		} else {
-			Some(RangeProof::read(reader)?)
-		};
-
-		let payload = Payload {
+		let rangeproof = read_optional(reader)?;
+		Ok(Payload {
 			excess,
 			fee,
 			rangeproof,
-		};
-		Ok(payload)
+		})
 	}
 }
 
@@ -57,15 +76,7 @@ impl Writeable for Payload {
 		writer.write_u8(CURRENT_VERSION)?;
 		writer.write_fixed_bytes(&self.excess)?;
 		writer.write_u64(self.fee.into())?;
-
-		match &self.rangeproof {
-			Some(proof) => {
-				writer.write_u8(1)?;
-				proof.write(writer)?;
-			}
-			None => writer.write_u8(0)?,
-		};
-
+		write_optional(writer, &self.rangeproof)?;
 		Ok(())
 	}
 }
