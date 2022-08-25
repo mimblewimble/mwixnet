@@ -19,6 +19,7 @@ mod onion;
 mod rpc;
 mod secp;
 mod server;
+mod store;
 mod types;
 mod wallet;
 

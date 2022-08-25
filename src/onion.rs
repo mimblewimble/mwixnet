@@ -4,7 +4,7 @@ use crate::types::Payload;
 use crate::onion::OnionError::{InvalidKeyLength, SerializationError};
 use chacha20::cipher::{NewCipher, StreamCipher};
 use chacha20::{ChaCha20, Key, Nonce};
-use grin_core::ser::{self, ProtocolVersion, Writeable, Writer};
+use grin_core::ser::{self, ProtocolVersion, Readable, Reader, Writeable, Writer};
 use grin_util::{self, ToHex};
 use hmac::digest::InvalidLength;
 use hmac::{Hmac, Mac};
@@ -119,6 +119,23 @@ impl Writeable for Onion {
 			p.write(writer)?;
 		}
 		Ok(())
+	}
+}
+
+impl Readable for Onion {
+	fn read<R: Reader>(reader: &mut R) -> Result<Onion, ser::Error> {
+		let ephemeral_pubkey = PublicKey::read(reader)?;
+		let commit = Commitment::read(reader)?;
+		let mut enc_payloads: Vec<RawBytes> = Vec::new();
+		let len = reader.read_u64()?;
+		for _ in 0..len {
+			enc_payloads.push(RawBytes::read(reader)?);
+		}
+		Ok(Onion {
+			ephemeral_pubkey,
+			commit,
+			enc_payloads,
+		})
 	}
 }
 

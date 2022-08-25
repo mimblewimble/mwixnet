@@ -38,6 +38,7 @@ grin_core = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alp
 grin_chain = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
 grin_keychain = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
 grin_servers = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
+grin_store = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
 grin_wallet_api = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
 grin_wallet_impls = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
 grin_wallet_libwallet = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
