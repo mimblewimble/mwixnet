@@ -3,7 +3,9 @@ use crate::secp::{self, Commitment, RangeProof, SecretKey};
 use crate::types::{read_optional, write_optional};
 
 use grin_core::core::Input;
-use grin_core::ser::{self, ProtocolVersion, Readable, Reader, Writeable, Writer};
+use grin_core::ser::{
+	self, DeserializationMode, ProtocolVersion, Readable, Reader, Writeable, Writer,
+};
 use grin_store::{self as store, Store};
 use grin_util::ToHex;
 use thiserror::Error;
@@ -78,6 +80,8 @@ pub struct SwapStore {
 /// Store error types
 #[derive(Clone, Error, Debug, PartialEq)]
 pub enum StoreError {
+	#[error("Swap entry already exists for '{0:?}'")]
+	AlreadyExists(Commitment),
 	#[error("Error occurred while attempting to open db: {0}")]
 	OpenError(store::lmdb::Error),
 	#[error("Serialization error occurred: {0}")]
@@ -96,7 +100,6 @@ impl From<ser::Error> for StoreError {
 
 impl SwapStore {
 	/// Create new chain store
-	#[allow(dead_code)]
 	pub fn new(db_root: &str) -> Result<SwapStore, StoreError> {
 		let db = Store::new(db_root, Some(DB_NAME), Some(STORE_SUBPATH), None)
 			.map_err(StoreError::OpenError)?;
@@ -109,10 +112,16 @@ impl SwapStore {
 		prefix: u8,
 		k: K,
 		value: &Vec<u8>,
-	) -> Result<(), store::lmdb::Error> {
+	) -> Result<bool, store::lmdb::Error> {
 		let batch = self.db.batch()?;
-		batch.put(&store::to_key(prefix, k)[..], &value[..])?;
-		batch.commit()
+		let key = store::to_key(prefix, k);
+		if batch.exists(&key[..])? {
+			Ok(false)
+		} else {
+			batch.put(&key[..], &value[..])?;
+			batch.commit()?;
+			Ok(true)
+		}
 	}
 
 	/// Reads a single value by key
@@ -124,16 +133,44 @@ impl SwapStore {
 	}
 
 	/// Saves a swap to the database
-	#[allow(dead_code)]
 	pub fn save_swap(&self, s: &SwapData) -> Result<(), StoreError> {
 		let data = ser::ser_vec(&s, ProtocolVersion::local())?;
-		self.write(SWAP_PREFIX, &s.output_commit, &data)
-			.map_err(StoreError::WriteError)
+		let saved = self
+			.write(SWAP_PREFIX, &s.input.commit, &data)
+			.map_err(StoreError::WriteError)?;
+		if !saved {
+			Err(StoreError::AlreadyExists(s.input.commit.clone()))
+		} else {
+			Ok(())
+		}
+	}
+
+	/// Iterator over all swaps.
+	pub fn swaps_iter(&self) -> Result<impl Iterator<Item = SwapData>, StoreError> {
+		let key = store::to_key(SWAP_PREFIX, "");
+		let protocol_version = self.db.protocol_version();
+		self.db
+			.iter(&key[..], move |_, mut v| {
+				ser::deserialize(&mut v, protocol_version, DeserializationMode::default())
+					.map_err(From::from)
+			})
+			.map_err(|e| StoreError::ReadError(e))
+	}
+
+	/// Checks if a matching swap exists in the database
+	#[allow(dead_code)]
+	pub fn swap_exists(&self, input_commit: &Commitment) -> Result<bool, StoreError> {
+		let key = store::to_key(SWAP_PREFIX, input_commit);
+		self.db
+			.batch()
+			.map_err(StoreError::ReadError)?
+			.exists(&key[..])
+			.map_err(StoreError::ReadError)
 	}
 
 	/// Reads a swap from the database
 	#[allow(dead_code)]
-	pub fn get_swap(&self, commit: &Commitment) -> Result<SwapData, StoreError> {
-		self.read(SWAP_PREFIX, commit)
+	pub fn get_swap(&self, input_commit: &Commitment) -> Result<SwapData, StoreError> {
+		self.read(SWAP_PREFIX, input_commit)
 	}
 }
