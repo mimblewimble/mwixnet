@@ -3,6 +3,7 @@ use node::HttpGrinNode;
 use store::SwapStore;
 use wallet::HttpWallet;
 
+use crate::node::GrinNode;
 use crate::store::StoreError;
 use clap::App;
 use grin_core::global;
@@ -133,19 +134,32 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		server_config.wallet_owner_secret_path = Some(wallet_owner_secret_path.to_owned());
 	}
 
+	// Create GrinNode
+	let node = HttpGrinNode::new(
+		&server_config.grin_node_url,
+		&server_config.node_api_secret(),
+	);
+
+	// Node API health check
+	if let Err(e) = node.get_chain_height() {
+		eprintln!("Node communication failure. Is node listening?");
+		return Err(e.into());
+	};
+
 	// Open wallet
 	let wallet_pass = prompt_wallet_password(&args.value_of("wallet_pass"));
 	let wallet = HttpWallet::open_wallet(
 		&server_config.wallet_owner_url,
 		&server_config.wallet_owner_api_secret(),
 		&wallet_pass,
-	)?;
-
-	// Create GrinNode
-	let node = HttpGrinNode::new(
-		&server_config.grin_node_url,
-		&server_config.node_api_secret(),
 	);
+	let wallet = match wallet {
+		Ok(w) => w,
+		Err(e) => {
+			eprintln!("Wallet communication failure. Is wallet listening?");
+			return Err(e.into());
+		}
+	};
 
 	// Open SwapStore
 	let store = SwapStore::new(
