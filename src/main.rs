@@ -5,6 +5,7 @@ use wallet::HttpWallet;
 
 use crate::store::StoreError;
 use clap::App;
+use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_util::{StopState, ZeroingString};
 use rpassword;
@@ -40,6 +41,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	} else {
 		ChainTypes::Mainnet
 	};
+	global::set_local_chain_type(chain_type);
 
 	let config_path = match args.value_of("config_file") {
 		Some(path) => PathBuf::from(path),
