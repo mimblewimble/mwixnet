@@ -2,10 +2,11 @@ use crate::config::ServerConfig;
 use crate::node::{self, GrinNode};
 use crate::onion::{Onion, OnionError};
 use crate::secp::{ComSignature, Commitment, Secp256k1, SecretKey};
-use crate::store::{StoreError, SwapData, SwapStore};
+use crate::store::{StoreError, SwapData, SwapStatus, SwapStore};
 use crate::wallet::{self, Wallet};
 
-use grin_core::core::{Input, Output, OutputFeatures, TransactionBody};
+use grin_core::core::hash::Hashed;
+use grin_core::core::{Input, Output, OutputFeatures, Transaction, TransactionBody};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
 use itertools::Itertools;
 use std::result::Result;
@@ -46,7 +47,7 @@ pub trait Server: Send + Sync {
 	/// and assemble the coinswap transaction, posting the transaction to the configured node.
 	///
 	/// Currently only a single mix node is used. Milestone 3 will include support for multiple mix nodes.
-	fn execute_round(&self) -> Result<(), Box<dyn std::error::Error>>;
+	fn execute_round(&self) -> Result<Option<Transaction>, Box<dyn std::error::Error>>;
 }
 
 /// The standard MWixnet server implementation
@@ -137,14 +138,18 @@ impl Server for ServerImpl {
 		let locked = self.store.lock().unwrap();
 
 		locked
-			.save_swap(&SwapData {
-				excess: peeled.0.excess,
-				output_commit: peeled.1.commit,
-				rangeproof: peeled.0.rangeproof,
-				input,
-				fee,
-				onion: peeled.1,
-			})
+			.save_swap(
+				&SwapData {
+					excess: peeled.0.excess,
+					output_commit: peeled.1.commit,
+					rangeproof: peeled.0.rangeproof,
+					input,
+					fee,
+					onion: peeled.1,
+					status: SwapStatus::Unprocessed,
+				},
+				false,
+			)
 			.map_err(|e| match e {
 				StoreError::AlreadyExists(_) => SwapError::AlreadySwapped {
 					commit: onion.commit.clone(),
@@ -154,13 +159,17 @@ impl Server for ServerImpl {
 		Ok(())
 	}
 
-	fn execute_round(&self) -> Result<(), Box<dyn std::error::Error>> {
+	fn execute_round(&self) -> Result<Option<Transaction>, Box<dyn std::error::Error>> {
 		let locked_store = self.store.lock().unwrap();
 		let next_block_height = self.node.get_chain_height()? + 1;
 
 		let spendable: Vec<SwapData> = locked_store
 			.swaps_iter()?
 			.unique_by(|s| s.output_commit)
+			.filter(|s| match s.status {
+				SwapStatus::Unprocessed => true,
+				_ => false,
+			})
 			.filter(|s| {
 				node::is_spendable(&self.node, &s.input.commit, next_block_height).unwrap_or(false)
 			})
@@ -168,7 +177,7 @@ impl Server for ServerImpl {
 			.collect();
 
 		if spendable.len() == 0 {
-			return Ok(());
+			return Ok(None);
 		}
 
 		let total_fee: u64 = spendable.iter().enumerate().map(|(_, s)| s.fee).sum();
@@ -203,9 +212,15 @@ impl Server for ServerImpl {
 		)?;
 
 		self.node.post_tx(&tx)?;
-		// todo: Update swap statuses
 
-		Ok(())
+		// Update status to in process
+		let kernel_hash = tx.kernels().first().unwrap().hash();
+		for mut swap in spendable {
+			swap.status = SwapStatus::InProcess { kernel_hash };
+			locked_store.save_swap(&swap, true)?;
+		}
+
+		Ok(Some(tx))
 	}
 }
 
@@ -215,6 +230,7 @@ pub mod mock {
 	use crate::onion::Onion;
 	use crate::secp::ComSignature;
 
+	use grin_core::core::Transaction;
 	use std::collections::HashMap;
 
 	pub struct MockServer {
@@ -242,8 +258,8 @@ pub mod mock {
 			Ok(())
 		}
 
-		fn execute_round(&self) -> Result<(), Box<dyn std::error::Error>> {
-			Ok(())
+		fn execute_round(&self) -> Result<Option<Transaction>, Box<dyn std::error::Error>> {
+			Ok(None)
 		}
 	}
 }
@@ -258,10 +274,11 @@ mod tests {
 		self, ComSignature, Commitment, PublicKey, RangeProof, Secp256k1, SecretKey,
 	};
 	use crate::server::{Server, ServerImpl, SwapError};
-	use crate::store::{SwapData, SwapStore};
+	use crate::store::{SwapData, SwapStatus, SwapStore};
 	use crate::types::Payload;
 	use crate::wallet::mock::MockWallet;
 
+	use grin_core::core::hash::Hashed;
 	use grin_core::core::{Committed, FeeFields, Input, OutputFeatures, Transaction, Weighting};
 	use grin_core::global::{self, ChainTypes};
 	use std::net::TcpListener;
@@ -379,6 +396,7 @@ mod tests {
 				commit: output_commit.clone(),
 				enc_payloads: vec![],
 			},
+			status: SwapStatus::Unprocessed,
 		};
 
 		{
@@ -388,13 +406,18 @@ mod tests {
 			assert_eq!(expected, store.get_swap(&input_commit).unwrap());
 		}
 
-		server.execute_round()?;
+		let tx = server.execute_round()?;
+		assert!(tx.is_some());
 
-		// todo: Make sure entry is removed from server.submissions
-		// assert_eq!(
-		// 	0,
-		// 	server.store.lock().unwrap().swaps_iter().unwrap().count()
-		// );
+		{
+			// check that status was updated
+			let store = server.store.lock().unwrap();
+			assert!(match store.get_swap(&input_commit)?.status {
+				SwapStatus::InProcess { kernel_hash } =>
+					kernel_hash == tx.unwrap().kernels().first().unwrap().hash(),
+				_ => false,
+			});
+		}
 
 		// check that the transaction was posted
 		let posted_txns = node.get_posted_txns();
