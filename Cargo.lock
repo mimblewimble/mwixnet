@@ -2483,6 +2483,7 @@ dependencies = [
  "grin_keychain 5.2.0-alpha.1 (git+https://github.com/mimblewimble/grin)",
  "grin_secp256k1zkp",
  "grin_servers",
+ "grin_store 5.2.0-alpha.1 (git+https://github.com/mimblewimble/grin)",
  "grin_util 5.1.1",
  "grin_wallet_api",
  "grin_wallet_impls",

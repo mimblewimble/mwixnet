@@ -217,6 +217,39 @@ pub fn sign(sk: &SecretKey, msg: &Message) -> Result<Signature, secp256k1zkp::Er
 }
 
 #[cfg(test)]
+pub mod test_util {
+	use crate::secp::{self, Commitment, PublicKey, RangeProof, Secp256k1};
+	use grin_core::core::hash::Hash;
+	use grin_util::ToHex;
+	use rand::RngCore;
+
+	pub fn rand_commit() -> Commitment {
+		secp::commit(rand::thread_rng().next_u64(), &secp::random_secret()).unwrap()
+	}
+
+	pub fn rand_hash() -> Hash {
+		Hash::from_hex(secp::random_secret().to_hex().as_str()).unwrap()
+	}
+
+	pub fn rand_proof() -> RangeProof {
+		let secp = Secp256k1::new();
+		secp.bullet_proof(
+			rand::thread_rng().next_u64(),
+			secp::random_secret(),
+			secp::random_secret(),
+			secp::random_secret(),
+			None,
+			None,
+		)
+	}
+
+	pub fn rand_pubkey() -> PublicKey {
+		let secp = Secp256k1::new();
+		PublicKey::from_secret_key(&secp, &secp::random_secret()).unwrap()
+	}
+}
+
+#[cfg(test)]
 mod tests {
 	use super::{ComSigError, ComSignature, ContextFlag, Secp256k1, SecretKey};
 

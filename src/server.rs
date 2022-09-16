@@ -1,32 +1,17 @@
 use crate::config::ServerConfig;
 use crate::node::{self, GrinNode};
 use crate::onion::{Onion, OnionError};
-use crate::secp::{ComSignature, Commitment, RangeProof, Secp256k1, SecretKey};
+use crate::secp::{ComSignature, Commitment, Secp256k1, SecretKey};
+use crate::store::{StoreError, SwapData, SwapStatus, SwapStore};
 use crate::wallet::{self, Wallet};
 
-use grin_core::core::{Input, Output, OutputFeatures, TransactionBody};
+use grin_core::core::hash::Hashed;
+use grin_core::core::{Input, Output, OutputFeatures, Transaction, TransactionBody};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
 use itertools::Itertools;
-use std::collections::HashMap;
 use std::result::Result;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-
-#[derive(Clone, Debug, PartialEq)]
-struct Submission {
-	/// The total excess for the output commitment
-	excess: SecretKey,
-	/// The derived output commitment after applying excess and fee
-	output_commit: Commitment,
-	/// The rangeproof, included only for the final hop (node N)
-	rangeproof: Option<RangeProof>,
-	/// Transaction input being spent
-	input: Input,
-	/// Transaction fee
-	fee: u64,
-	/// The remaining onion after peeling off our layer
-	onion: Onion,
-}
 
 /// Swap error types
 #[derive(Clone, Error, Debug, PartialEq)]
@@ -47,6 +32,8 @@ pub enum SwapError {
 	PeelOnionFailure(OnionError),
 	#[error("Fee too low (expected >= {minimum_fee:?}, actual {actual_fee:?})")]
 	FeeTooLow { minimum_fee: u64, actual_fee: u64 },
+	#[error("Error saving swap to data store: {0}")]
+	StoreError(StoreError),
 	#[error("{0}")]
 	UnknownError(String),
 }
@@ -60,7 +47,7 @@ pub trait Server: Send + Sync {
 	/// and assemble the coinswap transaction, posting the transaction to the configured node.
 	///
 	/// Currently only a single mix node is used. Milestone 3 will include support for multiple mix nodes.
-	fn execute_round(&self) -> Result<(), Box<dyn std::error::Error>>;
+	fn execute_round(&self) -> Result<Option<Transaction>, Box<dyn std::error::Error>>;
 }
 
 /// The standard MWixnet server implementation
@@ -69,7 +56,7 @@ pub struct ServerImpl {
 	server_config: ServerConfig,
 	wallet: Arc<dyn Wallet>,
 	node: Arc<dyn GrinNode>,
-	submissions: Arc<Mutex<HashMap<Commitment, Submission>>>,
+	store: Arc<Mutex<SwapStore>>,
 }
 
 impl ServerImpl {
@@ -78,12 +65,13 @@ impl ServerImpl {
 		server_config: ServerConfig,
 		wallet: Arc<dyn Wallet>,
 		node: Arc<dyn GrinNode>,
+		store: SwapStore,
 	) -> Self {
 		ServerImpl {
 			server_config,
 			wallet,
 			node,
-			submissions: Arc::new(Mutex::new(HashMap::new())),
+			store: Arc::new(Mutex::new(store)),
 		}
 	}
 
@@ -147,44 +135,49 @@ impl Server for ServerImpl {
 			return Err(SwapError::MissingRangeproof);
 		}
 
-		let mut locked = self.submissions.lock().unwrap();
-		if locked.contains_key(&onion.commit) {
-			return Err(SwapError::AlreadySwapped {
-				commit: onion.commit.clone(),
-			});
-		}
+		let locked = self.store.lock().unwrap();
 
-		locked.insert(
-			onion.commit,
-			Submission {
-				excess: peeled.0.excess,
-				output_commit: peeled.1.commit,
-				rangeproof: peeled.0.rangeproof,
-				input,
-				fee,
-				onion: peeled.1,
-			},
-		);
+		locked
+			.save_swap(
+				&SwapData {
+					excess: peeled.0.excess,
+					output_commit: peeled.1.commit,
+					rangeproof: peeled.0.rangeproof,
+					input,
+					fee,
+					onion: peeled.1,
+					status: SwapStatus::Unprocessed,
+				},
+				false,
+			)
+			.map_err(|e| match e {
+				StoreError::AlreadyExists(_) => SwapError::AlreadySwapped {
+					commit: onion.commit.clone(),
+				},
+				_ => SwapError::StoreError(e),
+			})?;
 		Ok(())
 	}
 
-	fn execute_round(&self) -> Result<(), Box<dyn std::error::Error>> {
-		let mut locked_state = self.submissions.lock().unwrap();
+	fn execute_round(&self) -> Result<Option<Transaction>, Box<dyn std::error::Error>> {
+		let locked_store = self.store.lock().unwrap();
 		let next_block_height = self.node.get_chain_height()? + 1;
 
-		let spendable: Vec<Submission> = locked_state
-			.values()
-			.into_iter()
+		let spendable: Vec<SwapData> = locked_store
+			.swaps_iter()?
 			.unique_by(|s| s.output_commit)
+			.filter(|s| match s.status {
+				SwapStatus::Unprocessed => true,
+				_ => false,
+			})
 			.filter(|s| {
 				node::is_spendable(&self.node, &s.input.commit, next_block_height).unwrap_or(false)
 			})
 			.filter(|s| !node::is_unspent(&self.node, &s.output_commit).unwrap_or(true))
-			.cloned()
 			.collect();
 
 		if spendable.len() == 0 {
-			return Ok(());
+			return Ok(None);
 		}
 
 		let total_fee: u64 = spendable.iter().enumerate().map(|(_, s)| s.fee).sum();
@@ -219,9 +212,15 @@ impl Server for ServerImpl {
 		)?;
 
 		self.node.post_tx(&tx)?;
-		locked_state.clear();
 
-		Ok(())
+		// Update status to in process
+		let kernel_hash = tx.kernels().first().unwrap().hash();
+		for mut swap in spendable {
+			swap.status = SwapStatus::InProcess { kernel_hash };
+			locked_store.save_swap(&swap, true)?;
+		}
+
+		Ok(Some(tx))
 	}
 }
 
@@ -231,6 +230,7 @@ pub mod mock {
 	use crate::onion::Onion;
 	use crate::secp::ComSignature;
 
+	use grin_core::core::Transaction;
 	use std::collections::HashMap;
 
 	pub struct MockServer {
@@ -258,8 +258,8 @@ pub mod mock {
 			Ok(())
 		}
 
-		fn execute_round(&self) -> Result<(), Box<dyn std::error::Error>> {
-			Ok(())
+		fn execute_round(&self) -> Result<Option<Transaction>, Box<dyn std::error::Error>> {
+			Ok(None)
 		}
 	}
 }
@@ -273,10 +273,12 @@ mod tests {
 	use crate::secp::{
 		self, ComSignature, Commitment, PublicKey, RangeProof, Secp256k1, SecretKey,
 	};
-	use crate::server::{Server, ServerImpl, Submission, SwapError};
+	use crate::server::{Server, ServerImpl, SwapError};
+	use crate::store::{SwapData, SwapStatus, SwapStore};
 	use crate::types::Payload;
 	use crate::wallet::mock::MockWallet;
 
+	use grin_core::core::hash::Hashed;
 	use grin_core::core::{Committed, FeeFields, Input, OutputFeatures, Transaction, Weighting};
 	use grin_core::global::{self, ChainTypes};
 	use std::net::TcpListener;
@@ -294,9 +296,14 @@ mod tests {
 	}
 
 	fn new_server(
+		test_name: &str,
 		server_key: &SecretKey,
 		utxos: &Vec<&Commitment>,
 	) -> (ServerImpl, Arc<MockGrinNode>) {
+		global::set_local_chain_type(ChainTypes::AutomatedTesting);
+		let db_root = format!("./target/tmp/.{}", test_name);
+		let _ = std::fs::remove_dir_all(db_root.as_str());
+
 		let config = ServerConfig {
 			key: server_key.clone(),
 			interval_s: 1,
@@ -315,8 +322,9 @@ mod tests {
 			mut_node.add_default_utxo(&utxo);
 		}
 		let node = Arc::new(mut_node);
+		let store = SwapStore::new(db_root.as_str()).unwrap();
 
-		let server = ServerImpl::new(config, wallet.clone(), node.clone());
+		let server = ServerImpl::new(config, wallet.clone(), node.clone(), store);
 		(server, node)
 	}
 
@@ -370,14 +378,14 @@ mod tests {
 		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
-		let (server, node) = new_server(&server_key, &vec![&input_commit]);
+		let (server, node) = new_server("swap_lifecycle", &server_key, &vec![&input_commit]);
 		server.swap(&onion, &comsig)?;
 
 		// Make sure entry is added to server.
 		let output_commit = secp::add_excess(&input_commit, &hop_excess)?;
 		let output_commit = secp::sub_value(&output_commit, fee)?;
 
-		let expected = Submission {
+		let expected = SwapData {
 			excess: hop_excess.clone(),
 			output_commit: output_commit.clone(),
 			rangeproof: Some(proof),
@@ -388,19 +396,28 @@ mod tests {
 				commit: output_commit.clone(),
 				enc_payloads: vec![],
 			},
+			status: SwapStatus::Unprocessed,
 		};
 
 		{
-			let submissions = server.submissions.lock().unwrap();
-			assert_eq!(1, submissions.len());
-			assert!(submissions.contains_key(&input_commit));
-			assert_eq!(&expected, submissions.get(&input_commit).unwrap());
+			let store = server.store.lock().unwrap();
+			assert_eq!(1, store.swaps_iter().unwrap().count());
+			assert!(store.swap_exists(&input_commit).unwrap());
+			assert_eq!(expected, store.get_swap(&input_commit).unwrap());
 		}
 
-		server.execute_round()?;
+		let tx = server.execute_round()?;
+		assert!(tx.is_some());
 
-		// Make sure entry is removed from server.submissions
-		assert!(server.submissions.lock().unwrap().is_empty());
+		{
+			// check that status was updated
+			let store = server.store.lock().unwrap();
+			assert!(match store.get_swap(&input_commit)?.status {
+				SwapStatus::InProcess { kernel_hash } =>
+					kernel_hash == tx.unwrap().kernels().first().unwrap().hash(),
+				_ => false,
+			});
+		}
 
 		// check that the transaction was posted
 		let posted_txns = node.get_posted_txns();
@@ -410,7 +427,6 @@ mod tests {
 		assert!(posted_txn.outputs_committed().contains(&output_commit));
 		// todo: check that outputs also contain the commitment generated by our wallet
 
-		global::set_local_chain_type(ChainTypes::AutomatedTesting);
 		posted_txn.validate(Weighting::AsTransaction)?;
 
 		Ok(())
@@ -433,7 +449,8 @@ mod tests {
 		let onion = test_util::create_onion(&input_commit, &hops)?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
-		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let (server, _node) =
+			new_server("swap_too_many_payloads", &server_key, &vec![&input_commit]);
 		let result = server.swap(&onion, &comsig);
 		assert_eq!(
 			Err(SwapError::InvalidPayloadLength {
@@ -443,8 +460,11 @@ mod tests {
 			result
 		);
 
-		// Make sure no entry is added to server.submissions
-		assert!(server.submissions.lock().unwrap().is_empty());
+		// Make sure no entry is added to the store
+		assert_eq!(
+			0,
+			server.store.lock().unwrap().swaps_iter().unwrap().count()
+		);
 
 		Ok(())
 	}
@@ -467,12 +487,19 @@ mod tests {
 		let wrong_blind = secp::random_secret();
 		let comsig = ComSignature::sign(value, &wrong_blind, &onion.serialize()?)?;
 
-		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let (server, _node) = new_server(
+			"swap_invalid_com_signature",
+			&server_key,
+			&vec![&input_commit],
+		);
 		let result = server.swap(&onion, &comsig);
 		assert_eq!(Err(SwapError::InvalidComSignature), result);
 
-		// Make sure no entry is added to server.submissions
-		assert!(server.submissions.lock().unwrap().is_empty());
+		// Make sure no entry is added to the store
+		assert_eq!(
+			0,
+			server.store.lock().unwrap().swaps_iter().unwrap().count()
+		);
 
 		Ok(())
 	}
@@ -494,12 +521,16 @@ mod tests {
 		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
-		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let (server, _node) =
+			new_server("swap_invalid_rangeproof", &server_key, &vec![&input_commit]);
 		let result = server.swap(&onion, &comsig);
 		assert_eq!(Err(SwapError::InvalidRangeproof), result);
 
-		// Make sure no entry is added to server.submissions
-		assert!(server.submissions.lock().unwrap().is_empty());
+		// Make sure no entry is added to the store
+		assert_eq!(
+			0,
+			server.store.lock().unwrap().swaps_iter().unwrap().count()
+		);
 
 		Ok(())
 	}
@@ -519,12 +550,16 @@ mod tests {
 		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
-		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let (server, _node) =
+			new_server("swap_missing_rangeproof", &server_key, &vec![&input_commit]);
 		let result = server.swap(&onion, &comsig);
 		assert_eq!(Err(SwapError::MissingRangeproof), result);
 
-		// Make sure no entry is added to server.submissions
-		assert!(server.submissions.lock().unwrap().is_empty());
+		// Make sure no entry is added to the store
+		assert_eq!(
+			0,
+			server.store.lock().unwrap().swaps_iter().unwrap().count()
+		);
 
 		Ok(())
 	}
@@ -545,7 +580,7 @@ mod tests {
 		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
-		let (server, _node) = new_server(&server_key, &vec![]);
+		let (server, _node) = new_server("swap_utxo_missing", &server_key, &vec![]);
 		let result = server.swap(&onion, &comsig);
 		assert_eq!(
 			Err(SwapError::CoinNotFound {
@@ -554,8 +589,11 @@ mod tests {
 			result
 		);
 
-		// Make sure no entry is added to server.submissions
-		assert!(server.submissions.lock().unwrap().is_empty());
+		// Make sure no entry is added to the store
+		assert_eq!(
+			0,
+			server.store.lock().unwrap().swaps_iter().unwrap().count()
+		);
 
 		Ok(())
 	}
@@ -576,7 +614,7 @@ mod tests {
 		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
-		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let (server, _node) = new_server("swap_already_swapped", &server_key, &vec![&input_commit]);
 		server.swap(&onion, &comsig)?;
 
 		// Call swap a second time
@@ -609,7 +647,8 @@ mod tests {
 		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
-		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let (server, _node) =
+			new_server("swap_peel_onion_failure", &server_key, &vec![&input_commit]);
 		let result = server.swap(&onion, &comsig);
 
 		assert!(result.is_err());
@@ -634,7 +673,7 @@ mod tests {
 		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
-		let (server, _node) = new_server(&server_key, &vec![&input_commit]);
+		let (server, _node) = new_server("swap_fee_too_low", &server_key, &vec![&input_commit]);
 		let result = server.swap(&onion, &comsig);
 		assert_eq!(
 			Err(SwapError::FeeTooLow {

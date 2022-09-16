@@ -1,8 +1,11 @@
 use config::ServerConfig;
 use node::HttpGrinNode;
+use store::SwapStore;
 use wallet::HttpWallet;
 
+use crate::store::StoreError;
 use clap::App;
+use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_util::{StopState, ZeroingString};
 use rpassword;
@@ -19,6 +22,7 @@ mod onion;
 mod rpc;
 mod secp;
 mod server;
+mod store;
 mod types;
 mod wallet;
 
@@ -37,6 +41,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	} else {
 		ChainTypes::Mainnet
 	};
+	global::set_local_chain_type(chain_type);
 
 	let config_path = match args.value_of("config_file") {
 		Some(path) => PathBuf::from(path),
@@ -142,6 +147,16 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		&server_config.node_api_secret(),
 	);
 
+	// Open SwapStore
+	let store = SwapStore::new(
+		config::get_grin_path(&chain_type) // todo: load from config
+			.join("db")
+			.to_str()
+			.ok_or(StoreError::OpenError(grin_store::lmdb::Error::FileErr(
+				"db_root path error".to_string(),
+			)))?,
+	)?;
+
 	let stop_state = Arc::new(StopState::new());
 	let stop_state_clone = stop_state.clone();
 
@@ -152,7 +167,13 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	});
 
 	// Start the mwixnet JSON-RPC HTTP server
-	rpc::listen(server_config, Arc::new(wallet), Arc::new(node), stop_state)
+	rpc::listen(
+		server_config,
+		Arc::new(wallet),
+		Arc::new(node),
+		store,
+		stop_state,
+	)
 }
 
 async fn build_signals_fut() {

@@ -4,7 +4,7 @@ use crate::types::Payload;
 use crate::onion::OnionError::{InvalidKeyLength, SerializationError};
 use chacha20::cipher::{NewCipher, StreamCipher};
 use chacha20::{ChaCha20, Key, Nonce};
-use grin_core::ser::{self, ProtocolVersion, Writeable, Writer};
+use grin_core::ser::{self, ProtocolVersion, Readable, Reader, Writeable, Writer};
 use grin_util::{self, ToHex};
 use hmac::digest::InvalidLength;
 use hmac::{Hmac, Mac};
@@ -119,6 +119,25 @@ impl Writeable for Onion {
 			p.write(writer)?;
 		}
 		Ok(())
+	}
+}
+
+impl Readable for Onion {
+	fn read<R: Reader>(reader: &mut R) -> Result<Onion, ser::Error> {
+		let ephemeral_pubkey = PublicKey::read(reader)?;
+		let commit = Commitment::read(reader)?;
+		let mut enc_payloads: Vec<RawBytes> = Vec::new();
+		let len = reader.read_u64()?;
+		for _ in 0..len {
+			let size = reader.read_u64()?;
+			let bytes = reader.read_fixed_bytes(size as usize)?;
+			enc_payloads.push(bytes);
+		}
+		Ok(Onion {
+			ephemeral_pubkey,
+			commit,
+			enc_payloads,
+		})
 	}
 }
 
@@ -248,11 +267,13 @@ impl From<ser::Error> for OnionError {
 #[cfg(test)]
 pub mod test_util {
 	use super::{Onion, OnionError, RawBytes};
-	use crate::secp::{Commitment, PublicKey, Secp256k1, SecretKey, SharedSecret};
+	use crate::secp::test_util::{rand_commit, rand_proof, rand_pubkey};
+	use crate::secp::{self, Commitment, PublicKey, Secp256k1, SecretKey, SharedSecret};
 	use crate::types::Payload;
 
-	use crate::secp;
 	use chacha20::cipher::StreamCipher;
+	use grin_core::core::FeeFields;
+	use rand::RngCore;
 
 	#[derive(Clone)]
 	pub struct Hop {
@@ -296,6 +317,29 @@ pub mod test_util {
 			enc_payloads,
 		};
 		Ok(onion)
+	}
+
+	pub fn rand_onion() -> Onion {
+		let commit = rand_commit();
+		let mut hops = Vec::new();
+		let k = (rand::thread_rng().next_u64() % 5) + 1;
+		for i in 0..k {
+			let hop = Hop {
+				pubkey: rand_pubkey(),
+				payload: Payload {
+					excess: secp::random_secret(),
+					fee: FeeFields::from(rand::thread_rng().next_u32()),
+					rangeproof: if i == (k - 1) {
+						Some(rand_proof())
+					} else {
+						None
+					},
+				},
+			};
+			hops.push(hop);
+		}
+
+		create_onion(&commit, &hops).unwrap()
 	}
 
 	/// Calculates the expected next ephemeral pubkey after peeling a layer off of the Onion.

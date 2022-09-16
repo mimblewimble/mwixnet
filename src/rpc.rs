@@ -3,6 +3,7 @@ use crate::node::GrinNode;
 use crate::onion::Onion;
 use crate::secp::{self, ComSignature};
 use crate::server::{Server, ServerImpl, SwapError};
+use crate::store::SwapStore;
 use crate::wallet::Wallet;
 
 use grin_util::StopState;
@@ -87,9 +88,10 @@ pub fn listen(
 	server_config: ServerConfig,
 	wallet: Arc<dyn Wallet>,
 	node: Arc<dyn GrinNode>,
+	store: SwapStore,
 	stop_state: Arc<StopState>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-	let server = ServerImpl::new(server_config.clone(), wallet.clone(), node.clone());
+	let server = ServerImpl::new(server_config.clone(), wallet.clone(), node.clone(), store);
 	let server = Arc::new(Mutex::new(server));
 
 	let rpc_server = RPCServer {
