@@ -150,9 +150,8 @@ impl GrinNode for HttpGrinNode {
 	fn get_chain_height(&self) -> Result<u64, NodeError> {
 		let params = json!([]);
 		let tip_json = self.send_json_request::<serde_json::Value>("get_tip", &params)?;
-
-		let tip = serde_json::from_value::<Tip>(tip_json["Ok"].clone())
-			.map_err(NodeError::DecodeResponseError)?;
+		let tip =
+			serde_json::from_value::<Tip>(tip_json).map_err(NodeError::DecodeResponseError)?;
 
 		Ok(tip.height)
 	}
