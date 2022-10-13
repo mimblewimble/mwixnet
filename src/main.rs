@@ -1,5 +1,6 @@
 use config::ServerConfig;
 use node::HttpGrinNode;
+use std::collections::HashMap;
 use store::SwapStore;
 use wallet::HttpWallet;
 
@@ -9,6 +10,9 @@ use clap::App;
 use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_util::{StopState, ZeroingString};
+use grin_wallet_impls::tor::config as tor_config;
+use grin_wallet_impls::tor::process as tor_process;
+use grin_wallet_util::OnionV3Address;
 use rpassword;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -74,7 +78,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		let server_config = ServerConfig {
 			key: secp::random_secret(),
 			interval_s: round_time.unwrap_or(DEFAULT_INTERVAL),
-			addr: bind_addr.unwrap_or("0.0.0.0:3000").parse()?,
+			addr: bind_addr.unwrap_or("127.0.0.1:3000").parse()?,
 			grin_node_url: match grin_node_url {
 				Some(u) => u.parse()?,
 				None => config::grin_node_url(&chain_type),
@@ -171,12 +175,15 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			)))?,
 	)?;
 
+	let mut tor_process = init_tor_listener(&server_config)?;
+
 	let stop_state = Arc::new(StopState::new());
 	let stop_state_clone = stop_state.clone();
 
 	let rt = Runtime::new()?;
 	rt.spawn(async move {
 		futures::executor::block_on(build_signals_fut());
+		let _ = tor_process.kill();
 		stop_state_clone.stop();
 	});
 
@@ -237,4 +244,40 @@ fn prompt_wallet_password(wallet_pass: &Option<&str>) -> ZeroingString {
 			ZeroingString::from(rpassword::prompt_password_stdout("Wallet password: ").unwrap())
 		}
 	}
+}
+
+fn init_tor_listener(
+	server_config: &ServerConfig,
+) -> Result<tor_process::TorProcess, Box<dyn std::error::Error>> {
+	let mut tor_dir = config::get_grin_path(&global::get_chain_type());
+	tor_dir.push("tor/listener");
+
+	let mut torrc_dir = tor_dir.clone();
+	torrc_dir.push("torrc");
+
+	tor_config::output_tor_listener_config(
+		tor_dir.to_str().unwrap(),
+		server_config.addr.to_string().as_str(),
+		&vec![server_config.key.clone()],
+		HashMap::new(),
+		HashMap::new(),
+	)
+	.unwrap();
+
+	// Start TOR process
+	let mut process = tor_process::TorProcess::new();
+	process
+		.torrc_path(torrc_dir.to_str().unwrap())
+		.working_dir(tor_dir.to_str().unwrap())
+		.timeout(20)
+		.completion_percent(100)
+		.launch()
+		.unwrap();
+
+	let onion_address = OnionV3Address::from_private(&server_config.key.0).unwrap();
+	println!(
+		"Server listening at http://{}.onion",
+		onion_address.to_ov3_str()
+	);
+	Ok(process)
 }

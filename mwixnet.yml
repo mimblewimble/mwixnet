@@ -35,7 +35,7 @@ args:
       long: wallet_pass
       takes_value: true
   - bind_addr:
-      help: Address to bind the rpc server to (e.g. 0.0.0.0:3000)
+      help: Address to bind the rpc server to (e.g. 127.0.0.1:3000)
       long: bind_addr
       takes_value: true
 subcommands:
