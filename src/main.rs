@@ -190,28 +190,30 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	)
 }
 
+#[cfg(unix)]
 async fn build_signals_fut() {
-	if cfg!(unix) {
-		use tokio::signal::unix::{signal, SignalKind};
+	use tokio::signal::unix::{signal, SignalKind};
 
-		// Listen for SIGINT, SIGQUIT, and SIGTERM
-		let mut terminate_signal =
-			signal(SignalKind::terminate()).expect("failed to create terminate signal");
-		let mut quit_signal = signal(SignalKind::quit()).expect("failed to create quit signal");
-		let mut interrupt_signal =
-			signal(SignalKind::interrupt()).expect("failed to create interrupt signal");
+	// Listen for SIGINT, SIGQUIT, and SIGTERM
+	let mut terminate_signal =
+		signal(SignalKind::terminate()).expect("failed to create terminate signal");
+	let mut quit_signal = signal(SignalKind::quit()).expect("failed to create quit signal");
+	let mut interrupt_signal =
+		signal(SignalKind::interrupt()).expect("failed to create interrupt signal");
 
-		futures::future::select_all(vec![
-			Box::pin(terminate_signal.recv()),
-			Box::pin(quit_signal.recv()),
-			Box::pin(interrupt_signal.recv()),
-		])
-		.await;
-	} else {
-		tokio::signal::ctrl_c()
-			.await
-			.expect("failed to install CTRL+C signal handler");
-	}
+	futures::future::select_all(vec![
+		Box::pin(terminate_signal.recv()),
+		Box::pin(quit_signal.recv()),
+		Box::pin(interrupt_signal.recv()),
+	])
+	.await;
+}
+
+#[cfg(not(unix))]
+async fn build_signals_fut() {
+	tokio::signal::ctrl_c()
+		.await
+		.expect("failed to install CTRL+C signal handler");
 }
 
 fn prompt_password() -> ZeroingString {
