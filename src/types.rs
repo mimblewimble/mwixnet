@@ -1,4 +1,4 @@
-use crate::secp::{self, RangeProof, SecretKey};
+use crate::crypto::secp::{self, RangeProof, SecretKey};
 
 use grin_core::core::FeeFields;
 use grin_core::ser::{self, Readable, Reader, Writeable, Writer};

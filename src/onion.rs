@@ -1,4 +1,4 @@
-use crate::secp::{self, Commitment, SecretKey};
+use crate::crypto::secp::{self, Commitment, SecretKey};
 use crate::types::Payload;
 
 use crate::onion::OnionError::{InvalidKeyLength, SerializationError};
@@ -57,6 +57,15 @@ fn vec_to_32_byte_arr(v: Vec<u8>) -> Result<[u8; 32], OnionError> {
 	v.try_into().map_err(|_| InvalidKeyLength)
 }
 
+/// An onion with a layer decrypted
+#[derive(Clone, Debug)]
+pub struct PeeledOnion {
+	/// The payload from the peeled layer
+	pub payload: Payload,
+	/// The onion remaining after a layer was peeled
+	pub onion: Onion,
+}
+
 impl Onion {
 	pub fn serialize(&self) -> Result<Vec<u8>, ser::Error> {
 		let mut vec = vec![];
@@ -65,7 +74,7 @@ impl Onion {
 	}
 
 	/// Peel a single layer off of the Onion, returning the peeled Onion and decrypted Payload
-	pub fn peel_layer(&self, secret_key: &SecretKey) -> Result<(Payload, Onion), OnionError> {
+	pub fn peel_layer(&self, secret_key: &SecretKey) -> Result<PeeledOnion, OnionError> {
 		let shared_secret = StaticSecret::from(secret_key.0).diffie_hellman(&self.ephemeral_pubkey);
 		let mut cipher = new_stream_cipher(&shared_secret)?;
 
@@ -106,7 +115,10 @@ impl Onion {
 			commit: commitment.clone(),
 			enc_payloads,
 		};
-		Ok((decrypted_payload, peeled_onion))
+		Ok(PeeledOnion {
+			payload: decrypted_payload,
+			onion: peeled_onion,
+		})
 	}
 }
 
@@ -292,13 +304,14 @@ impl From<ser::Error> for OnionError {
 #[cfg(test)]
 pub mod test_util {
 	use super::{Onion, OnionError, RawBytes};
-	use crate::secp::test_util::{rand_commit, rand_proof};
-	use crate::secp::{random_secret, Commitment, SecretKey};
+	use crate::crypto::secp::test_util::{rand_commit, rand_proof};
+	use crate::crypto::secp::{random_secret, Commitment, SecretKey};
 	use crate::types::Payload;
 
 	use chacha20::cipher::StreamCipher;
 	use grin_core::core::FeeFields;
 	use rand::{thread_rng, RngCore};
+	use secp256k1zkp::pedersen::RangeProof;
 	use x25519_dalek::PublicKey as xPublicKey;
 	use x25519_dalek::{SharedSecret, StaticSecret};
 
@@ -307,6 +320,23 @@ pub mod test_util {
 		pub pubkey: xPublicKey,
 		pub payload: Payload,
 	}
+
+	pub fn new_hop(
+		server_key: &SecretKey,
+		hop_excess: &SecretKey,
+		fee: u64,
+		proof: Option<RangeProof>,
+	) -> Hop {
+		Hop {
+			pubkey: xPublicKey::from(&StaticSecret::from(server_key.0.clone())),
+			payload: Payload {
+				excess: hop_excess.clone(),
+				fee: FeeFields::from(fee as u32),
+				rangeproof: proof,
+			},
+		}
+	}
+
 	/*
 	Choose random xi for each node ni and create a Payload (Pi) for each containing xi
 	Build a rangeproof for Cn=Cin+(Σx1...n)*G and include it in payload Pn
@@ -391,7 +421,7 @@ pub mod test_util {
 #[cfg(test)]
 pub mod tests {
 	use super::test_util::{self, Hop};
-	use crate::secp;
+	use crate::crypto::secp;
 	use crate::types::Payload;
 
 	use grin_core::core::FeeFields;
@@ -454,8 +484,8 @@ pub mod tests {
 		};
 		for i in 0..5 {
 			let peeled = onion_packet.peel_layer(&keys[i]).unwrap();
-			payload = peeled.0;
-			onion_packet = peeled.1;
+			payload = peeled.payload;
+			onion_packet = peeled.onion;
 		}
 
 		assert!(payload.rangeproof.is_some());

@@ -1,8 +1,10 @@
-use crate::secp::SecretKey;
+use crate::crypto::dalek::DalekPublicKey;
+use crate::crypto::secp::SecretKey;
 
 use core::num::NonZeroU32;
 use grin_core::global::ChainTypes;
 use grin_util::{file, ToHex, ZeroingString};
+use grin_wallet_util::OnionV3Address;
 use rand::{thread_rng, Rng};
 use ring::{aead, pbkdf2};
 use serde_derive::{Deserialize, Serialize};
@@ -26,6 +28,8 @@ pub struct ServerConfig {
 	pub interval_s: u32,
 	/// socket address the server listener should bind to
 	pub addr: SocketAddr,
+	/// socket address the tor sender should bind to
+	pub socks_proxy_addr: SocketAddr,
 	/// foreign api address of the grin node
 	pub grin_node_url: SocketAddr,
 	/// path to file containing api secret for the grin node
@@ -34,9 +38,23 @@ pub struct ServerConfig {
 	pub wallet_owner_url: SocketAddr,
 	/// path to file containing secret for the grin wallet's owner api
 	pub wallet_owner_secret_path: Option<String>,
+	/// public key of the previous mix/swap server (e.g. N_1 if this is N_2)
+	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	pub prev_server: Option<DalekPublicKey>,
+	/// public key of the next mix server
+	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	pub next_server: Option<DalekPublicKey>,
 }
 
 impl ServerConfig {
+	pub fn onion_address(&self) -> OnionV3Address {
+		OnionV3Address::from_private(&self.key.0).unwrap()
+	}
+
+	pub fn server_pubkey(&self) -> DalekPublicKey {
+		DalekPublicKey::from_secret(&self.key)
+	}
+
 	pub fn node_api_secret(&self) -> Option<String> {
 		file::get_first_line(self.grin_node_secret_path.clone())
 	}
@@ -163,10 +181,15 @@ struct RawConfig {
 	nonce: String,
 	interval_s: u32,
 	addr: SocketAddr,
+	socks_proxy_addr: SocketAddr,
 	grin_node_url: SocketAddr,
 	grin_node_secret_path: Option<String>,
 	wallet_owner_url: SocketAddr,
 	wallet_owner_secret_path: Option<String>,
+	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	prev_server: Option<DalekPublicKey>,
+	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	next_server: Option<DalekPublicKey>,
 }
 
 /// Writes the server config to the config_path given, encrypting the server_key first.
@@ -183,10 +206,13 @@ pub fn write_config(
 		nonce: encrypted.nonce,
 		interval_s: server_config.interval_s,
 		addr: server_config.addr,
+		socks_proxy_addr: server_config.socks_proxy_addr,
 		grin_node_url: server_config.grin_node_url,
 		grin_node_secret_path: server_config.grin_node_secret_path.clone(),
 		wallet_owner_url: server_config.wallet_owner_url,
 		wallet_owner_secret_path: server_config.wallet_owner_secret_path.clone(),
+		prev_server: server_config.prev_server.clone(),
+		next_server: server_config.next_server.clone(),
 	};
 	let encoded: String =
 		toml::to_string(&raw_config).map_err(|e| ConfigError::EncodingError(e))?;
@@ -203,10 +229,8 @@ pub fn load_config(
 	config_path: &PathBuf,
 	password: &ZeroingString,
 ) -> Result<ServerConfig, ConfigError> {
-	let contents =
-		std::fs::read_to_string(config_path).map_err(|e| ConfigError::ReadConfigError(e))?;
-	let raw_config: RawConfig =
-		toml::from_str(&contents).map_err(|e| ConfigError::DecodingError(e))?;
+	let contents = std::fs::read_to_string(config_path).map_err(ConfigError::ReadConfigError)?;
+	let raw_config: RawConfig = toml::from_str(&contents).map_err(ConfigError::DecodingError)?;
 
 	let encrypted_key = EncryptedServerKey {
 		encrypted_key: raw_config.encrypted_key,
@@ -219,10 +243,13 @@ pub fn load_config(
 		key: secret_key,
 		interval_s: raw_config.interval_s,
 		addr: raw_config.addr,
+		socks_proxy_addr: raw_config.socks_proxy_addr,
 		grin_node_url: raw_config.grin_node_url,
 		grin_node_secret_path: raw_config.grin_node_secret_path,
 		wallet_owner_url: raw_config.wallet_owner_url,
 		wallet_owner_secret_path: raw_config.wallet_owner_secret_path,
+		prev_server: raw_config.prev_server,
+		next_server: raw_config.next_server,
 	})
 }
 
@@ -261,9 +288,36 @@ pub fn wallet_owner_url(_chain_type: &ChainTypes) -> SocketAddr {
 }
 
 #[cfg(test)]
+pub mod test_util {
+	use crate::{DalekPublicKey, ServerConfig};
+	use secp256k1zkp::SecretKey;
+	use std::net::TcpListener;
+
+	pub fn local_config(
+		server_key: &SecretKey,
+		prev_server: &Option<DalekPublicKey>,
+		next_server: &Option<DalekPublicKey>,
+	) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+		let config = ServerConfig {
+			key: server_key.clone(),
+			interval_s: 1,
+			addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
+			socks_proxy_addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
+			grin_node_url: "127.0.0.1:3413".parse()?,
+			grin_node_secret_path: None,
+			wallet_owner_url: "127.0.0.1:3420".parse()?,
+			wallet_owner_secret_path: None,
+			prev_server: prev_server.clone(),
+			next_server: next_server.clone(),
+		};
+		Ok(config)
+	}
+}
+
+#[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::secp;
+	use crate::crypto::secp;
 
 	#[test]
 	fn server_key_encrypt() {

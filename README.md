@@ -1,7 +1,11 @@
 # MWixnet
 This is an implementation of @tromp's [CoinSwap Proposal](https://forum.grin.mw/t/mimblewimble-coinswap-proposal/8322) with some slight modifications.
 
-A set of n CoinSwap servers (node<sub>i</sub> with i=1...n) are agreed upon in advance. They each have a known public key.
+A set of n CoinSwap servers (N<sub>i</sub> with i=1...n) are agreed upon in advance. They each have a known public key.
+
+We refer to the first server (N<sub>1</sub>) as the "Swap Server." This is the server that wallets can submit their coinswaps too.
+
+We refer to the remaining servers (N<sub>2</sub>...N<sub>n</sub>) as "Mixers." 
 
 ### Setup
 #### init-config
@@ -19,7 +23,7 @@ A grin-wallet account must be created for receiving extra mwixnet fees. The wall
 With your wallet and fully synced node both online and listening at the addresses configured, the mwixnet server can be started by running `mwixnet` and providing the server key password and wallet password when prompted.
 
 ### SWAP API
-The first CoinSwap server (n<sub>1</sub>) provides the `swap` API, publicly available for use by GRIN wallets.
+The Swap Server (N<sub>1</sub>) provides the `swap` API, which is publicly available for use by GRIN wallets.
 
 **jsonrpc:** `2.0`
 **method:** `swap`

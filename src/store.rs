@@ -1,5 +1,5 @@
+use crate::crypto::secp::{self, Commitment, RangeProof, SecretKey};
 use crate::onion::Onion;
-use crate::secp::{self, Commitment, RangeProof, SecretKey};
 use crate::types::{read_optional, write_optional};
 use grin_core::core::hash::Hash;
 
@@ -23,6 +23,7 @@ pub enum SwapStatus {
 	Unprocessed,
 	InProcess { kernel_hash: Hash },
 	Completed { kernel_hash: Hash, block_hash: Hash },
+	Failed,
 }
 
 impl Writeable for SwapStatus {
@@ -42,6 +43,9 @@ impl Writeable for SwapStatus {
 				writer.write_u8(2)?;
 				kernel_hash.write(writer)?;
 				block_hash.write(writer)?;
+			}
+			SwapStatus::Failed => {
+				writer.write_u8(3)?;
 			}
 		};
 
@@ -65,6 +69,7 @@ impl Readable for SwapStatus {
 					block_hash,
 				}
 			}
+			3 => SwapStatus::Failed,
 			_ => {
 				return Err(ser::Error::CorruptedData);
 			}
@@ -239,10 +244,11 @@ impl SwapStore {
 
 #[cfg(test)]
 mod tests {
+	use crate::crypto::secp;
+	use crate::crypto::secp::test_util::{rand_commit, rand_hash, rand_proof};
 	use crate::onion::test_util::rand_onion;
-	use crate::secp::test_util::{rand_commit, rand_hash, rand_proof};
 	use crate::store::{SwapData, SwapStatus, SwapStore};
-	use crate::{secp, StoreError};
+	use crate::StoreError;
 	use grin_core::core::{Input, OutputFeatures};
 	use grin_core::global::{self, ChainTypes};
 	use rand::RngCore;
