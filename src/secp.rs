@@ -218,7 +218,7 @@ pub fn sign(sk: &SecretKey, msg: &Message) -> Result<Signature, secp256k1zkp::Er
 
 #[cfg(test)]
 pub mod test_util {
-	use crate::secp::{self, Commitment, PublicKey, RangeProof, Secp256k1};
+	use crate::secp::{self, Commitment, RangeProof, Secp256k1};
 	use grin_core::core::hash::Hash;
 	use grin_util::ToHex;
 	use rand::RngCore;
@@ -241,11 +241,6 @@ pub mod test_util {
 			None,
 			None,
 		)
-	}
-
-	pub fn rand_pubkey() -> PublicKey {
-		let secp = Secp256k1::new();
-		PublicKey::from_secret_key(&secp, &secp::random_secret()).unwrap()
 	}
 }
 

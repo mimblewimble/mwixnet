@@ -11,7 +11,9 @@ byteorder = "1"
 bytes = "0.5.6"
 chacha20 = "0.8.1"
 clap = { version = "2.33", features = ["yaml"] }
+curve25519-dalek = "2.1"
 dirs = "2.0"
+ed25519-dalek = "1.0.1"
 futures = "0.3"
 hmac = { version = "0.12.0", features = ["std"]}
 hyper = { version = "0.14", features = ["full"] }
@@ -21,7 +23,7 @@ jsonrpc-derive = "18.0"
 jsonrpc-http-server = "18.0"
 lazy_static = "1"
 pbkdf2 = "0.8.0"
-rand = "0.8.4"
+rand = "0.7.3"
 ring = "0.16"
 rpassword = "4.0"
 serde = { version = "1", features= ["derive"]}
@@ -31,6 +33,7 @@ sha2 = "0.10.0"
 thiserror = "1.0.31"
 tokio = { version = "1", features = ["full"] }
 toml = "0.5"
+x25519-dalek = "0.6.0"
 grin_secp256k1zkp = { version = "0.7.11", features = ["bullet-proof-sizing"]}
 grin_util = "5"
 grin_api = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
@@ -42,3 +45,4 @@ grin_store = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-al
 grin_wallet_api = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
 grin_wallet_impls = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
 grin_wallet_libwallet = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
+grin_wallet_util = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }

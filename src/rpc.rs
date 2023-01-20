@@ -100,7 +100,6 @@ pub fn listen(
 	};
 
 	let http_server = rpc_server.start_http();
-	println!("Server listening on {}", server_config.addr);
 
 	let close_handle = http_server.close_handle();
 	let round_handle = spawn(move || {

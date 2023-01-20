@@ -270,9 +270,7 @@ mod tests {
 	use crate::node::mock::MockGrinNode;
 	use crate::onion::test_util::{self, Hop};
 	use crate::onion::Onion;
-	use crate::secp::{
-		self, ComSignature, Commitment, PublicKey, RangeProof, Secp256k1, SecretKey,
-	};
+	use crate::secp::{self, ComSignature, Commitment, RangeProof, Secp256k1, SecretKey};
 	use crate::server::{Server, ServerImpl, SwapError};
 	use crate::store::{SwapData, SwapStatus, SwapStore};
 	use crate::types::Payload;
@@ -283,6 +281,8 @@ mod tests {
 	use grin_core::global::{self, ChainTypes};
 	use std::net::TcpListener;
 	use std::sync::Arc;
+	use x25519_dalek::PublicKey as xPublicKey;
+	use x25519_dalek::StaticSecret;
 
 	macro_rules! assert_error_type {
 		($result:expr, $error_type:pat) => {
@@ -351,9 +351,8 @@ mod tests {
 		fee: u64,
 		proof: Option<RangeProof>,
 	) -> Hop {
-		let secp = Secp256k1::new();
 		Hop {
-			pubkey: PublicKey::from_secret_key(&secp, &server_key).unwrap(),
+			pubkey: xPublicKey::from(&StaticSecret::from(server_key.0.clone())),
 			payload: Payload {
 				excess: hop_excess.clone(),
 				fee: FeeFields::from(fee as u32),
