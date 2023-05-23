@@ -7,7 +7,7 @@ use secp256k1zkp::rand::thread_rng;
 use thiserror::Error;
 
 /// A generalized Schnorr signature with a pedersen commitment value & blinding factors as the keys
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ComSignature {
 	pub_nonce: Commitment,
 	s: SecretKey,

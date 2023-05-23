@@ -221,7 +221,6 @@ mod tests {
 			"{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}",
 			serde_json::json!(swap)
 		);
-		println!("Request: {}", req);
 		let response = make_request(server, req)?;
 		let expected = "{\"jsonrpc\":\"2.0\",\"result\":\"success\",\"id\":\"1\"}\n";
 		assert_eq!(response, expected);

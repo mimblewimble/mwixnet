@@ -28,7 +28,7 @@ mod servers;
 mod store;
 mod tor;
 mod tx;
-mod types;
+mod util;
 mod wallet;
 
 const DEFAULT_INTERVAL: u32 = 12 * 60 * 60;

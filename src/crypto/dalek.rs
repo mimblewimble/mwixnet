@@ -174,7 +174,6 @@ pub mod test_util {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::crypto::dalek::test_util;
 	use crate::crypto::dalek::test_util::rand_keypair;
 	use grin_core::ser::{self, ProtocolVersion};
 	use grin_util::ToHex;
@@ -191,7 +190,7 @@ mod tests {
 	#[test]
 	fn pubkey_test() -> Result<(), Box<dyn std::error::Error>> {
 		// Test from_hex
-		let rand_pk = test_util::rand_keypair().1;
+		let rand_pk = rand_keypair().1;
 		let pk_from_hex = DalekPublicKey::from_hex(rand_pk.0.to_hex().as_str()).unwrap();
 		assert_eq!(rand_pk.0, pk_from_hex.0);
 

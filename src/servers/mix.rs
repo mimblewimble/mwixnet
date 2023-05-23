@@ -324,9 +324,12 @@ mod tests {
 	use crate::crypto::secp::{self, Commitment};
 	use crate::node::mock::MockGrinNode;
 	use crate::onion::test_util;
-	use crate::MixClient;
+	use crate::{DalekPublicKey, MixClient};
 
+	use crate::onion::test_util::Hop;
 	use ::function_name::named;
+	use secp256k1zkp::pedersen::RangeProof;
+	use secp256k1zkp::SecretKey;
 	use std::collections::HashSet;
 	use std::sync::Arc;
 
@@ -341,50 +344,89 @@ mod tests {
 		}};
 	}
 
+	struct ServerVars {
+		fee: u32,
+		sk: SecretKey,
+		pk: DalekPublicKey,
+		excess: SecretKey,
+	}
+
+	impl ServerVars {
+		fn new(fee: u32) -> Self {
+			let (sk, pk) = dalek::test_util::rand_keypair();
+			let excess = secp::random_secret();
+			ServerVars {
+				fee,
+				sk,
+				pk,
+				excess,
+			}
+		}
+
+		fn build_hop(&self, proof: Option<RangeProof>) -> Hop {
+			test_util::new_hop(&self.sk, &self.excess, self.fee, proof)
+		}
+	}
+
+	/// Tests the happy path for a 3 server setup.
+	///
+	/// Servers:
+	/// * Swap Server - Simulated by test
+	/// * Mixer 1 - Internal MixServerImpl directly called by test
+	/// * Mixer 2 - Final MixServerImpl called by Mixer 1
 	#[test]
 	#[named]
 	fn mix_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
 		init_test!();
 
-		let value: u64 = 200_000_000;
-		let fee: u64 = 50_000_000;
-		let blind = secp::random_secret();
-		let input_commit = secp::commit(value, &blind)?;
-		let node = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
+		// Setup Input(s)
+		let input1_value: u64 = 200_000_000;
+		let input1_blind = secp::random_secret();
+		let input1_commit = secp::commit(input1_value, &input1_blind)?;
+		let input_commits = vec![&input1_commit];
 
-		let (swap_sk, swap_pk) = dalek::test_util::rand_keypair();
-		let (mix1_sk, mix1_pk) = dalek::test_util::rand_keypair();
-		let (mix2_sk, mix2_pk) = dalek::test_util::rand_keypair();
-
-		let swap_hop_excess = secp::random_secret();
-		let swap_hop = test_util::new_hop(&swap_sk, &swap_hop_excess, fee, None);
-
-		let mix1_hop_excess = secp::random_secret();
-		let mix1_hop = test_util::new_hop(&mix1_sk, &mix1_hop_excess, fee, None);
-
-		let mix2_hop_excess = secp::random_secret();
-		let (out_commit, proof) = secp::test_util::proof(
-			value,
-			fee * 3,
-			&blind,
-			&vec![&swap_hop_excess, &mix1_hop_excess, &mix2_hop_excess],
+		// Setup Servers
+		let (swap_vars, mix1_vars, mix2_vars) = (
+			ServerVars::new(50_000_000),
+			ServerVars::new(50_000_000),
+			ServerVars::new(50_000_000),
 		);
-		let mix2_hop = test_util::new_hop(&mix2_sk, &mix2_hop_excess, fee, Some(proof));
 
-		let onion = test_util::create_onion(&input_commit, &vec![swap_hop, mix1_hop, mix2_hop])?;
-
-		let (mixer2_client, mixer2_wallet) =
-			super::test_util::new_mixer(&mix2_sk, (&mix1_sk, &mix1_pk), &None, &node);
-
-		let (mixer1_client, mixer1_wallet) = super::test_util::new_mixer(
-			&mix1_sk,
-			(&swap_sk, &swap_pk),
-			&Some((mix2_pk.clone(), mixer2_client.clone())),
+		let node = Arc::new(MockGrinNode::new_with_utxos(&input_commits));
+		let (mixer2_client, mixer2_wallet) = super::test_util::new_mixer(
+			&mix2_vars.sk,
+			(&mix1_vars.sk, &mix1_vars.pk),
+			&None,
 			&node,
 		);
 
-		// Emulate the swap server peeling the onion and then calling mix1
-		let mix1_onion = onion.peel_layer(&swap_sk)?;
+		let (mixer1_client, mixer1_wallet) = super::test_util::new_mixer(
+			&mix1_vars.sk,
+			(&swap_vars.sk, &swap_vars.pk),
+			&Some((mix2_vars.pk.clone(), mixer2_client.clone())),
+			&node,
+		);
+
+		// Build rangeproof
+		let (output_commit, proof) = secp::test_util::proof(
+			input1_value,
+			swap_vars.fee + mix1_vars.fee + mix2_vars.fee,
+			&input1_blind,
+			&vec![&swap_vars.excess, &mix1_vars.excess, &mix2_vars.excess],
+		);
+
+		// Create Onion
+		let onion = test_util::create_onion(
+			&input1_commit,
+			&vec![
+				swap_vars.build_hop(None),
+				mix1_vars.build_hop(None),
+				mix2_vars.build_hop(Some(proof)),
+			],
+		)?;
+
+		// Simulate the swap server peeling the onion and then calling mix1
+		let mix1_onion = onion.peel_layer(&swap_vars.sk)?;
 		let (mixed_indices, mixed_components) =
 			mixer1_client.mix_outputs(&vec![mix1_onion.onion.clone()])?;
 
@@ -396,7 +438,7 @@ mod tests {
 			.iter()
 			.map(|o| o.identifier.commit.clone())
 			.collect();
-		assert!(output_commits.contains(&out_commit));
+		assert!(output_commits.contains(&output_commit));
 
 		assert_eq!(mixer1_wallet.built_outputs().len(), 1);
 		assert!(output_commits.contains(mixer1_wallet.built_outputs().get(0).unwrap()));

@@ -153,7 +153,7 @@ impl SwapServer for SwapServerImpl {
 					output_commit: peeled.onion.commit,
 					rangeproof: peeled.payload.rangeproof,
 					input,
-					fee,
+					fee: fee as u64,
 					onion: peeled.onion,
 					status: SwapStatus::Unprocessed,
 				},
@@ -355,6 +355,7 @@ mod tests {
 	use grin_core::core::{Committed, Input, Output, OutputFeatures, Transaction, Weighting};
 	use secp256k1zkp::key::ZERO_KEY;
 	use std::sync::Arc;
+	use x25519_dalek::PublicKey as xPublicKey;
 
 	macro_rules! assert_error_type {
 		($result:expr, $error_type:pat) => {
@@ -385,7 +386,7 @@ mod tests {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
-		let fee: u64 = 50_000_000;
+		let fee: u32 = 50_000_000;
 		let blind = secp::random_secret();
 		let input_commit = secp::commit(value, &blind)?;
 
@@ -394,7 +395,7 @@ mod tests {
 		let (output_commit, proof) = secp::test_util::proof(value, fee, &blind, &vec![&hop_excess]);
 		let hop = test_util::new_hop(&server_key, &hop_excess, fee, Some(proof));
 
-		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let onion = test_util::create_onion(&input_commit, &vec![hop.clone()])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
@@ -407,9 +408,9 @@ mod tests {
 			output_commit: output_commit.clone(),
 			rangeproof: Some(proof),
 			input: Input::new(OutputFeatures::Plain, input_commit.clone()),
-			fee,
+			fee: fee as u64,
 			onion: Onion {
-				ephemeral_pubkey: test_util::next_ephemeral_pubkey(&onion, &server_key)?,
+				ephemeral_pubkey: xPublicKey::from([0u8; 32]),
 				commit: output_commit.clone(),
 				enc_payloads: vec![],
 			},
@@ -462,13 +463,13 @@ mod tests {
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
 
 		// Swapper data
-		let swap_fee: u64 = 50_000_000;
+		let swap_fee: u32 = 50_000_000;
 		let (swap_sk, _swap_pk) = dalek::test_util::rand_keypair();
 		let swap_hop_excess = secp::random_secret();
 		let swap_hop = test_util::new_hop(&swap_sk, &swap_hop_excess, swap_fee, None);
 
 		// Mixer data
-		let mixer_fee: u64 = 30_000_000;
+		let mixer_fee: u32 = 30_000_000;
 		let (mixer_sk, mixer_pk) = dalek::test_util::rand_keypair();
 		let mixer_hop_excess = secp::random_secret();
 		let (output_commit, proof) = secp::test_util::proof(
@@ -493,7 +494,7 @@ mod tests {
 				output_commit.clone(),
 				proof.clone(),
 			)],
-			kernels: vec![tx::build_kernel(&mixer_hop_excess, mixer_fee)?],
+			kernels: vec![tx::build_kernel(&mixer_hop_excess, mixer_fee as u64)?],
 		};
 		mock_mixer.set_response(
 			&vec![mixer_onion.clone()],
@@ -532,7 +533,7 @@ mod tests {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
-		let fee: u64 = 50_000_000;
+		let fee: u32 = 50_000_000;
 		let blind = secp::random_secret();
 		let input_commit = secp::commit(value, &blind)?;
 
@@ -567,7 +568,7 @@ mod tests {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
-		let fee: u64 = 50_000_000;
+		let fee: u32 = 50_000_000;
 		let blind = secp::random_secret();
 		let input_commit = secp::commit(value, &blind)?;
 
@@ -603,7 +604,7 @@ mod tests {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
-		let fee: u64 = 50_000_000;
+		let fee: u32 = 50_000_000;
 		let blind = secp::random_secret();
 		let input_commit = secp::commit(value, &blind)?;
 
@@ -638,7 +639,7 @@ mod tests {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
-		let fee: u64 = 50_000_000;
+		let fee: u32 = 50_000_000;
 		let blind = secp::random_secret();
 		let input_commit = secp::commit(value, &blind)?;
 
@@ -670,7 +671,7 @@ mod tests {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
-		let fee: u64 = 50_000_000;
+		let fee: u32 = 50_000_000;
 		let blind = secp::random_secret();
 		let input_commit = secp::commit(value, &blind)?;
 
@@ -709,7 +710,7 @@ mod tests {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
-		let fee: u64 = 50_000_000;
+		let fee: u32 = 50_000_000;
 		let blind = secp::random_secret();
 		let input_commit = secp::commit(value, &blind)?;
 
@@ -745,7 +746,7 @@ mod tests {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
-		let fee: u64 = 50_000_000;
+		let fee: u32 = 50_000_000;
 		let blind = secp::random_secret();
 		let input_commit = secp::commit(value, &blind)?;
 
@@ -777,7 +778,7 @@ mod tests {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
-		let fee: u64 = 1_000_000;
+		let fee: u32 = 1_000_000;
 		let blind = secp::random_secret();
 		let input_commit = secp::commit(value, &blind)?;
 
@@ -796,7 +797,7 @@ mod tests {
 		assert_eq!(
 			Err(SwapError::FeeTooLow {
 				minimum_fee: 12_500_000,
-				actual_fee: fee
+				actual_fee: fee as u64
 			}),
 			result
 		);

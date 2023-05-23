@@ -90,7 +90,7 @@ pub mod test_util {
 
 	pub fn proof(
 		value: u64,
-		fee: u64,
+		fee: u32,
 		input_blind: &SecretKey,
 		hop_excesses: &Vec<&SecretKey>,
 	) -> (Commitment, RangeProof) {
@@ -101,7 +101,7 @@ pub mod test_util {
 			blind.add_assign(&secp, &hop_excess).unwrap();
 		}
 
-		let out_value = value - fee;
+		let out_value = value - (fee as u64);
 
 		let rp = secp.bullet_proof(
 			out_value,

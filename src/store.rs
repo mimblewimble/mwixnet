@@ -1,6 +1,6 @@
 use crate::crypto::secp::{self, Commitment, RangeProof, SecretKey};
 use crate::onion::Onion;
-use crate::types::{read_optional, write_optional};
+use crate::util::{read_optional, write_optional};
 use grin_core::core::hash::Hash;
 
 use grin_core::core::Input;
