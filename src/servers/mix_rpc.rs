@@ -1,11 +1,11 @@
+use crate::client::MixClient;
 use crate::config::ServerConfig;
 use crate::crypto::dalek::{self, DalekSignature};
 use crate::node::GrinNode;
-use crate::onion::Onion;
 use crate::servers::mix::{MixError, MixServer, MixServerImpl};
 use crate::wallet::Wallet;
 
-use crate::client::MixClient;
+use grin_onion::onion::Onion;
 use grin_util::StopState;
 use jsonrpc_derive::rpc;
 use jsonrpc_http_server::jsonrpc_core::{self as jsonrpc, IoHandler};

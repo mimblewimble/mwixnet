@@ -4,12 +4,13 @@ use store::SwapStore;
 use wallet::HttpWallet;
 
 use crate::client::{MixClient, MixClientImpl};
-use crate::crypto::dalek::DalekPublicKey;
 use crate::node::GrinNode;
 use crate::store::StoreError;
 use clap::App;
 use grin_core::global;
 use grin_core::global::ChainTypes;
+use grin_onion::crypto;
+use grin_onion::crypto::dalek::DalekPublicKey;
 use grin_util::{StopState, ZeroingString};
 use rpassword;
 use std::path::PathBuf;
@@ -21,14 +22,11 @@ extern crate clap;
 
 mod client;
 mod config;
-mod crypto;
 mod node;
-mod onion;
 mod servers;
 mod store;
 mod tor;
 mod tx;
-mod util;
 mod wallet;
 
 const DEFAULT_INTERVAL: u32 = 12 * 60 * 60;

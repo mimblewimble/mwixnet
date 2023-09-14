@@ -1,12 +1,12 @@
+use crate::client::MixClient;
 use crate::config::ServerConfig;
-use crate::crypto::comsig::{self, ComSignature};
 use crate::node::GrinNode;
-use crate::onion::Onion;
 use crate::servers::swap::{SwapError, SwapServer, SwapServerImpl};
 use crate::store::SwapStore;
 use crate::wallet::Wallet;
 
-use crate::client::MixClient;
+use grin_onion::crypto::comsig::{self, ComSignature};
+use grin_onion::onion::Onion;
 use grin_util::StopState;
 use jsonrpc_core::Value;
 use jsonrpc_derive::rpc;
@@ -133,11 +133,11 @@ mod tests {
 	use crate::config::ServerConfig;
 	use crate::crypto::comsig::ComSignature;
 	use crate::crypto::secp;
-	use crate::onion::test_util;
 	use crate::servers::swap::mock::MockSwapServer;
 	use crate::servers::swap::{SwapError, SwapServer};
 	use crate::servers::swap_rpc::{RPCSwapServer, SwapReq};
 
+	use grin_onion::create_onion;
 	use std::net::TcpListener;
 	use std::sync::{Arc, Mutex};
 
@@ -208,7 +208,7 @@ mod tests {
 	#[test]
 	fn swap_success() -> Result<(), Box<dyn std::error::Error>> {
 		let commitment = secp::commit(1234, &secp::random_secret())?;
-		let onion = test_util::create_onion(&commitment, &vec![])?;
+		let onion = create_onion(&commitment, &vec![])?;
 		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
 		let swap = SwapReq {
 			onion: onion.clone(),
@@ -247,7 +247,7 @@ mod tests {
 	#[test]
 	fn swap_utxo_missing() -> Result<(), Box<dyn std::error::Error>> {
 		let commitment = secp::commit(1234, &secp::random_secret())?;
-		let onion = test_util::create_onion(&commitment, &vec![])?;
+		let onion = create_onion(&commitment, &vec![])?;
 		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
 		let swap = SwapReq {
 			onion: onion.clone(),

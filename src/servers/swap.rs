@@ -1,19 +1,19 @@
+use crate::client::MixClient;
 use crate::config::ServerConfig;
 use crate::crypto::comsig::ComSignature;
 use crate::crypto::secp::{Commitment, Secp256k1, SecretKey};
 use crate::node::{self, GrinNode};
-use crate::onion::{Onion, OnionError};
 use crate::store::{StoreError, SwapData, SwapStatus, SwapStore};
 use crate::tx;
 use crate::wallet::Wallet;
-use std::collections::HashSet;
 
-use crate::client::MixClient;
 use grin_core::core::hash::Hashed;
 use grin_core::core::{Input, Output, OutputFeatures, Transaction, TransactionBody};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
+use grin_onion::onion::{Onion, OnionError};
 use itertools::Itertools;
 use secp256k1zkp::key::ZERO_KEY;
+use std::collections::HashSet;
 use std::result::Result;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -268,9 +268,9 @@ impl SwapServer for SwapServerImpl {
 pub mod mock {
 	use super::{SwapError, SwapServer};
 	use crate::crypto::comsig::ComSignature;
-	use crate::onion::Onion;
 
 	use grin_core::core::Transaction;
+	use grin_onion::onion::Onion;
 	use std::collections::HashMap;
 
 	pub struct MockSwapServer {
@@ -339,12 +339,7 @@ pub mod test_util {
 
 #[cfg(test)]
 mod tests {
-	use crate::crypto::comsig::ComSignature;
-	use crate::crypto::dalek;
-	use crate::crypto::secp;
 	use crate::node::mock::MockGrinNode;
-	use crate::onion::test_util::{self, Hop};
-	use crate::onion::Onion;
 	use crate::servers::swap::{SwapError, SwapServer};
 	use crate::store::{SwapData, SwapStatus};
 	use crate::tx::TxComponents;
@@ -353,6 +348,11 @@ mod tests {
 	use ::function_name::named;
 	use grin_core::core::hash::Hashed;
 	use grin_core::core::{Committed, Input, Output, OutputFeatures, Transaction, Weighting};
+	use grin_onion::crypto::comsig::ComSignature;
+	use grin_onion::crypto::secp;
+	use grin_onion::onion::Onion;
+	use grin_onion::test_util as onion_test_util;
+	use grin_onion::{create_onion, new_hop, Hop};
 	use secp256k1zkp::key::ZERO_KEY;
 	use std::sync::Arc;
 	use x25519_dalek::PublicKey as xPublicKey;
@@ -392,10 +392,10 @@ mod tests {
 
 		let server_key = secp::random_secret();
 		let hop_excess = secp::random_secret();
-		let (output_commit, proof) = secp::test_util::proof(value, fee, &blind, &vec![&hop_excess]);
-		let hop = test_util::new_hop(&server_key, &hop_excess, fee, Some(proof));
+		let (output_commit, proof) = onion_test_util::proof(value, fee, &blind, &vec![&hop_excess]);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
 
-		let onion = test_util::create_onion(&input_commit, &vec![hop.clone()])?;
+		let onion = create_onion(&input_commit, &vec![hop.clone()])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
@@ -464,24 +464,24 @@ mod tests {
 
 		// Swapper data
 		let swap_fee: u32 = 50_000_000;
-		let (swap_sk, _swap_pk) = dalek::test_util::rand_keypair();
+		let (swap_sk, _swap_pk) = onion_test_util::rand_keypair();
 		let swap_hop_excess = secp::random_secret();
-		let swap_hop = test_util::new_hop(&swap_sk, &swap_hop_excess, swap_fee, None);
+		let swap_hop = new_hop(&swap_sk, &swap_hop_excess, swap_fee, None);
 
 		// Mixer data
 		let mixer_fee: u32 = 30_000_000;
-		let (mixer_sk, mixer_pk) = dalek::test_util::rand_keypair();
+		let (mixer_sk, mixer_pk) = onion_test_util::rand_keypair();
 		let mixer_hop_excess = secp::random_secret();
-		let (output_commit, proof) = secp::test_util::proof(
+		let (output_commit, proof) = onion_test_util::proof(
 			value,
 			swap_fee + mixer_fee,
 			&blind,
 			&vec![&swap_hop_excess, &mixer_hop_excess],
 		);
-		let mixer_hop = test_util::new_hop(&mixer_sk, &mixer_hop_excess, mixer_fee, Some(proof));
+		let mixer_hop = new_hop(&mixer_sk, &mixer_hop_excess, mixer_fee, Some(proof));
 
 		// Create onion
-		let onion = test_util::create_onion(&input_commit, &vec![swap_hop, mixer_hop])?;
+		let onion = create_onion(&input_commit, &vec![swap_hop, mixer_hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		// Mock mixer
@@ -540,11 +540,11 @@ mod tests {
 		let server_key = secp::random_secret();
 		let hop_excess = secp::random_secret();
 		let (_output_commit, proof) =
-			secp::test_util::proof(value, fee, &blind, &vec![&hop_excess]);
-		let hop = test_util::new_hop(&server_key, &hop_excess, fee, Some(proof));
+			onion_test_util::proof(value, fee, &blind, &vec![&hop_excess]);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
 
 		let hops: Vec<Hop> = vec![hop.clone(), hop.clone()]; // Multiple payloads
-		let onion = test_util::create_onion(&input_commit, &hops)?;
+		let onion = create_onion(&input_commit, &hops)?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
@@ -575,10 +575,10 @@ mod tests {
 		let server_key = secp::random_secret();
 		let hop_excess = secp::random_secret();
 		let (_output_commit, proof) =
-			secp::test_util::proof(value, fee, &blind, &vec![&hop_excess]);
-		let hop = test_util::new_hop(&server_key, &hop_excess, fee, Some(proof));
+			onion_test_util::proof(value, fee, &blind, &vec![&hop_excess]);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
 
-		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let onion = create_onion(&input_commit, &vec![hop])?;
 
 		let wrong_blind = secp::random_secret();
 		let comsig = ComSignature::sign(value, &wrong_blind, &onion.serialize()?)?;
@@ -612,10 +612,10 @@ mod tests {
 		let hop_excess = secp::random_secret();
 		let wrong_value = value + 10_000_000;
 		let (_output_commit, proof) =
-			secp::test_util::proof(wrong_value, fee, &blind, &vec![&hop_excess]);
-		let hop = test_util::new_hop(&server_key, &hop_excess, fee, Some(proof));
+			onion_test_util::proof(wrong_value, fee, &blind, &vec![&hop_excess]);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
 
-		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let onion = create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
@@ -645,9 +645,9 @@ mod tests {
 
 		let server_key = secp::random_secret();
 		let hop_excess = secp::random_secret();
-		let hop = test_util::new_hop(&server_key, &hop_excess, fee, None);
+		let hop = new_hop(&server_key, &hop_excess, fee, None);
 
-		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let onion = create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
@@ -678,10 +678,10 @@ mod tests {
 		let server_key = secp::random_secret();
 		let hop_excess = secp::random_secret();
 		let (_output_commit, proof) =
-			secp::test_util::proof(value, fee, &blind, &vec![&hop_excess]);
-		let hop = test_util::new_hop(&server_key, &hop_excess, fee, Some(proof));
+			onion_test_util::proof(value, fee, &blind, &vec![&hop_excess]);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
 
-		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let onion = create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new());
@@ -717,10 +717,10 @@ mod tests {
 		let server_key = secp::random_secret();
 		let hop_excess = secp::random_secret();
 		let (_output_commit, proof) =
-			secp::test_util::proof(value, fee, &blind, &vec![&hop_excess]);
-		let hop = test_util::new_hop(&server_key, &hop_excess, fee, Some(proof));
+			onion_test_util::proof(value, fee, &blind, &vec![&hop_excess]);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
 
-		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let onion = create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
@@ -753,12 +753,12 @@ mod tests {
 		let server_key = secp::random_secret();
 		let hop_excess = secp::random_secret();
 		let (_output_commit, proof) =
-			secp::test_util::proof(value, fee, &blind, &vec![&hop_excess]);
+			onion_test_util::proof(value, fee, &blind, &vec![&hop_excess]);
 
 		let wrong_server_key = secp::random_secret();
-		let hop = test_util::new_hop(&wrong_server_key, &hop_excess, fee, Some(proof));
+		let hop = new_hop(&wrong_server_key, &hop_excess, fee, Some(proof));
 
-		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let onion = create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
@@ -785,10 +785,10 @@ mod tests {
 		let server_key = secp::random_secret();
 		let hop_excess = secp::random_secret();
 		let (_output_commit, proof) =
-			secp::test_util::proof(value, fee, &blind, &vec![&hop_excess]);
-		let hop = test_util::new_hop(&server_key, &hop_excess, fee, Some(proof));
+			onion_test_util::proof(value, fee, &blind, &vec![&hop_excess]);
+		let hop = new_hop(&server_key, &hop_excess, fee, Some(proof));
 
-		let onion = test_util::create_onion(&input_commit, &vec![hop])?;
+		let onion = create_onion(&input_commit, &vec![hop])?;
 		let comsig = ComSignature::sign(value, &blind, &onion.serialize()?)?;
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));

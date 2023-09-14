@@ -1,19 +1,19 @@
+use crate::client::MixClient;
 use crate::config::ServerConfig;
-use crate::crypto::dalek::{self, DalekSignature};
-use crate::onion::{Onion, OnionError, PeeledOnion};
+use crate::tx::TxComponents;
 use crate::wallet::Wallet;
 use crate::{node, tx, GrinNode};
-use std::collections::{HashMap, HashSet};
 
-use crate::client::MixClient;
-use crate::tx::TxComponents;
 use grin_core::core::{Output, OutputFeatures, TransactionBody};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
 use grin_core::ser;
 use grin_core::ser::ProtocolVersion;
+use grin_onion::crypto::dalek::{self, DalekSignature};
+use grin_onion::onion::{Onion, OnionError, PeeledOnion};
 use itertools::Itertools;
 use secp256k1zkp::key::ZERO_KEY;
 use secp256k1zkp::Secp256k1;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -320,14 +320,13 @@ mod test_util {
 
 #[cfg(test)]
 mod tests {
-	use crate::crypto::dalek;
-	use crate::crypto::secp::{self, Commitment};
 	use crate::node::mock::MockGrinNode;
-	use crate::onion::test_util;
 	use crate::{DalekPublicKey, MixClient};
 
-	use crate::onion::test_util::Hop;
 	use ::function_name::named;
+	use grin_onion::crypto::secp::{self, Commitment};
+	use grin_onion::test_util as onion_test_util;
+	use grin_onion::{create_onion, new_hop, Hop};
 	use secp256k1zkp::pedersen::RangeProof;
 	use secp256k1zkp::SecretKey;
 	use std::collections::HashSet;
@@ -353,7 +352,7 @@ mod tests {
 
 	impl ServerVars {
 		fn new(fee: u32) -> Self {
-			let (sk, pk) = dalek::test_util::rand_keypair();
+			let (sk, pk) = onion_test_util::rand_keypair();
 			let excess = secp::random_secret();
 			ServerVars {
 				fee,
@@ -364,7 +363,7 @@ mod tests {
 		}
 
 		fn build_hop(&self, proof: Option<RangeProof>) -> Hop {
-			test_util::new_hop(&self.sk, &self.excess, self.fee, proof)
+			new_hop(&self.sk, &self.excess, self.fee, proof)
 		}
 	}
 
@@ -408,7 +407,7 @@ mod tests {
 		);
 
 		// Build rangeproof
-		let (output_commit, proof) = secp::test_util::proof(
+		let (output_commit, proof) = onion_test_util::proof(
 			input1_value,
 			swap_vars.fee + mix1_vars.fee + mix2_vars.fee,
 			&input1_blind,
@@ -416,7 +415,7 @@ mod tests {
 		);
 
 		// Create Onion
-		let onion = test_util::create_onion(
+		let onion = create_onion(
 			&input1_commit,
 			&vec![
 				swap_vars.build_hop(None),

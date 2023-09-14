@@ -1,9 +1,9 @@
 use crate::config::ServerConfig;
 use crate::crypto::dalek;
-use crate::onion::Onion;
 use crate::servers::mix_rpc::MixReq;
 use crate::tx::TxComponents;
 use crate::{tor, DalekPublicKey};
+use grin_onion::onion::Onion;
 
 use grin_api::client;
 use grin_api::json_rpc::build_request;
@@ -97,8 +97,8 @@ impl MixClient for MixClientImpl {
 #[cfg(test)]
 pub mod mock {
 	use super::{ClientError, MixClient};
-	use crate::onion::Onion;
 	use crate::tx::TxComponents;
+	use grin_onion::onion::Onion;
 
 	use std::collections::HashMap;
 
@@ -136,12 +136,12 @@ pub mod test_util {
 	use super::{ClientError, MixClient};
 	use crate::crypto::dalek;
 	use crate::crypto::secp::SecretKey;
-	use crate::onion::Onion;
 	use crate::servers::mix::MixServer;
 	use crate::tx::TxComponents;
 	use crate::DalekPublicKey;
 	use grin_core::ser;
 	use grin_core::ser::ProtocolVersion;
+	use grin_onion::onion::Onion;
 	use std::sync::Arc;
 
 	/// Implementation of the 'MixClient' trait that calls a mix server implementation directly.

@@ -160,18 +160,6 @@ pub fn sign(sk: &SecretKey, message: &[u8]) -> Result<DalekSignature, DalekError
 }
 
 #[cfg(test)]
-pub mod test_util {
-	use super::*;
-	use crate::crypto::secp::random_secret;
-
-	pub fn rand_keypair() -> (SecretKey, DalekPublicKey) {
-		let sk = random_secret();
-		let pk = DalekPublicKey::from_secret(&sk);
-		(sk, pk)
-	}
-}
-
-#[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::crypto::dalek::test_util::rand_keypair;

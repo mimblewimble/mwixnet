@@ -167,6 +167,47 @@ fn add_kernel_and_collect_fees(
 	})
 }
 
+/// Builds a transaction kernel for the Grin network.
+///
+/// Transaction kernels are a critical part of the Grin transaction process. Each transaction contains a
+/// kernel. It includes features chosen for this transaction, a fee chosen for this transaction, and
+/// a proof that the total sum of outputs, transaction fees and block reward equals the total sum of inputs.
+/// The `build_kernel` function handles this process, building the kernel and handling any potential errors.
+///
+/// # Arguments
+///
+/// * `excess`: A reference to a `SecretKey`. This key is used as an excess value for the transaction.
+///    The excess is a kind of cryptographic proof that the total sum of outputs and fees equals the
+///    total sum of inputs.
+/// * `fee`: An unsigned 64-bit integer representing the transaction fee in nanogrin. This is the fee
+///    that will be paid to the miner who mines the block containing this transaction.
+///
+/// # Returns
+///
+/// The function returns a `Result` enum with `TxKernel` as the Ok variant and `TxError` as the Err variant.
+/// If the kernel is successfully built, it is returned as part of the Ok variant. If there is an error at any point
+/// during the process, it is returned as part of the Err variant.
+///
+/// # Errors
+///
+/// This function can return several types of errors, all defined in the `TxError` enum. These include:
+///
+/// * `KernelFeeError`: There was an error building the kernel's fee fields.
+/// * `KernelExcessError`: There was an error computing the kernel's excess.
+/// * `KernelSigMessageError`: There was an error computing the kernel's signature message.
+/// * `KernelSigError`: There was an error signing the kernel.
+/// * `KernelVerifyError`: The built kernel failed to verify.
+///
+/// # Example
+///
+/// ```rust
+/// use secp256k1zkp::key::SecretKey;
+/// use crate::crypto::secp;
+///
+/// let secret_key = SecretKey::new(&mut secp::rand::thread_rng());
+/// let fee = 10; // 10 nanogrin
+/// let kernel = build_kernel(&secret_key, fee);
+/// ```
 pub fn build_kernel(excess: &SecretKey, fee: u64) -> Result<TxKernel, TxError> {
 	let mut kernel = TxKernel::with_features(KernelFeatures::Plain {
 		fee: FeeFields::new(0, fee).map_err(TxError::KernelFeeError)?,
