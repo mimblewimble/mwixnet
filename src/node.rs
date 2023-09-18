@@ -1,4 +1,4 @@
-use crate::secp::Commitment;
+use crate::crypto::secp::Commitment;
 
 use grin_api::client;
 use grin_api::json_rpc::{build_request, Request, Response};
@@ -43,10 +43,10 @@ pub fn is_unspent(node: &Arc<dyn GrinNode>, commit: &Commitment) -> Result<bool,
 /// Checks whether a commitment is spendable at the block height provided
 pub fn is_spendable(
 	node: &Arc<dyn GrinNode>,
-	output_commit: &Commitment,
+	commit: &Commitment,
 	next_block_height: u64,
 ) -> Result<bool, NodeError> {
-	let output = node.get_utxo(&output_commit)?;
+	let output = node.get_utxo(&commit)?;
 	if let Some(out) = output {
 		let is_coinbase = match out.output_type {
 			OutputType::Coinbase => true,
@@ -166,7 +166,7 @@ impl GrinNode for HttpGrinNode {
 #[cfg(test)]
 pub mod mock {
 	use super::{GrinNode, NodeError};
-	use crate::secp::Commitment;
+	use crate::crypto::secp::Commitment;
 
 	use grin_api::{OutputPrintable, OutputType};
 	use grin_core::core::Transaction;
@@ -181,11 +181,22 @@ pub mod mock {
 	}
 
 	impl MockGrinNode {
-		pub fn new() -> MockGrinNode {
+		pub fn new() -> Self {
 			MockGrinNode {
 				utxos: HashMap::new(),
 				txns_posted: RwLock::new(Vec::new()),
 			}
+		}
+
+		pub fn new_with_utxos(utxos: &Vec<&Commitment>) -> Self {
+			let mut node = MockGrinNode {
+				utxos: HashMap::new(),
+				txns_posted: RwLock::new(Vec::new()),
+			};
+			for utxo in utxos {
+				node.add_default_utxo(utxo);
+			}
+			node
 		}
 
 		pub fn add_utxo(&mut self, output_commit: &Commitment, utxo: &OutputPrintable) {

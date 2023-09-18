@@ -1,17 +1,16 @@
-use crate::secp::{self, Commitment, SecretKey};
-use crate::types::Payload;
+use crate::crypto::secp::{self, Commitment, RangeProof, SecretKey};
+use crate::util::{read_optional, vec_to_array, write_optional};
 
-use crate::onion::OnionError::{InvalidKeyLength, SerializationError};
 use chacha20::cipher::{NewCipher, StreamCipher};
 use chacha20::{ChaCha20, Key, Nonce};
+use grin_core::core::FeeFields;
 use grin_core::ser::{self, Readable, Reader, Writeable, Writer};
 use grin_util::{self, ToHex};
 use hmac::digest::InvalidLength;
 use hmac::{Hmac, Mac};
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use std::convert::TryInto;
+use sha2::Sha256;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::result::Result;
@@ -19,7 +18,9 @@ use thiserror::Error;
 use x25519_dalek::{PublicKey as xPublicKey, SharedSecret, StaticSecret};
 
 type HmacSha256 = Hmac<Sha256>;
-type RawBytes = Vec<u8>;
+pub type RawBytes = Vec<u8>;
+
+const CURRENT_ONION_VERSION: u8 = 0;
 
 /// A data packet with layers of encryption
 #[derive(Clone, Debug)]
@@ -53,8 +54,67 @@ impl Hash for Onion {
 	}
 }
 
-fn vec_to_32_byte_arr(v: Vec<u8>) -> Result<[u8; 32], OnionError> {
-	v.try_into().map_err(|_| InvalidKeyLength)
+/// A single, decrypted/peeled layer of an Onion.
+#[derive(Debug, Clone)]
+pub struct Payload {
+	pub next_ephemeral_pk: xPublicKey,
+	pub excess: SecretKey,
+	pub fee: FeeFields,
+	pub rangeproof: Option<RangeProof>,
+}
+
+impl Payload {
+	pub fn deserialize(bytes: &Vec<u8>) -> Result<Payload, ser::Error> {
+		let payload: Payload = ser::deserialize_default(&mut &bytes[..])?;
+		Ok(payload)
+	}
+
+	pub fn serialize(&self) -> Result<Vec<u8>, ser::Error> {
+		let mut vec = vec![];
+		ser::serialize_default(&mut vec, &self)?;
+		Ok(vec)
+	}
+}
+
+impl Readable for Payload {
+	fn read<R: Reader>(reader: &mut R) -> Result<Payload, ser::Error> {
+		let version = reader.read_u8()?;
+		if version != CURRENT_ONION_VERSION {
+			return Err(ser::Error::UnsupportedProtocolVersion);
+		}
+
+		let next_ephemeral_pk =
+			xPublicKey::from(vec_to_array::<32>(&reader.read_fixed_bytes(32)?)?);
+		let excess = secp::read_secret_key(reader)?;
+		let fee = FeeFields::try_from(reader.read_u64()?).map_err(|_| ser::Error::CorruptedData)?;
+		let rangeproof = read_optional(reader)?;
+		Ok(Payload {
+			next_ephemeral_pk,
+			excess,
+			fee,
+			rangeproof,
+		})
+	}
+}
+
+impl Writeable for Payload {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ser::Error> {
+		writer.write_u8(CURRENT_ONION_VERSION)?;
+		writer.write_fixed_bytes(&self.next_ephemeral_pk.as_bytes())?;
+		writer.write_fixed_bytes(&self.excess)?;
+		writer.write_u64(self.fee.into())?;
+		write_optional(writer, &self.rangeproof)?;
+		Ok(())
+	}
+}
+
+/// An onion with a layer decrypted
+#[derive(Clone, Debug)]
+pub struct PeeledOnion {
+	/// The payload from the peeled layer
+	pub payload: Payload,
+	/// The onion remaining after a layer was peeled
+	pub onion: Onion,
 }
 
 impl Onion {
@@ -65,8 +125,8 @@ impl Onion {
 	}
 
 	/// Peel a single layer off of the Onion, returning the peeled Onion and decrypted Payload
-	pub fn peel_layer(&self, secret_key: &SecretKey) -> Result<(Payload, Onion), OnionError> {
-		let shared_secret = StaticSecret::from(secret_key.0).diffie_hellman(&self.ephemeral_pubkey);
+	pub fn peel_layer(&self, server_key: &SecretKey) -> Result<PeeledOnion, OnionError> {
+		let shared_secret = StaticSecret::from(server_key.0).diffie_hellman(&self.ephemeral_pubkey);
 		let mut cipher = new_stream_cipher(&shared_secret)?;
 
 		let mut decrypted_bytes = self.enc_payloads[0].clone();
@@ -86,15 +146,6 @@ impl Onion {
 			})
 			.collect();
 
-		let blinding_factor = calc_blinding_factor(&shared_secret, &self.ephemeral_pubkey)?;
-
-		let ephemeral_key = StaticSecret::from(
-			*blinding_factor
-				.diffie_hellman(&self.ephemeral_pubkey)
-				.as_bytes(),
-		);
-		let ephemeral_pubkey = xPublicKey::from(&ephemeral_key);
-
 		let mut commitment = self.commit.clone();
 		commitment = secp::add_excess(&commitment, &decrypted_payload.excess)
 			.map_err(|e| OnionError::CalcCommitError(e))?;
@@ -102,31 +153,18 @@ impl Onion {
 			.map_err(|e| OnionError::CalcCommitError(e))?;
 
 		let peeled_onion = Onion {
-			ephemeral_pubkey,
+			ephemeral_pubkey: decrypted_payload.next_ephemeral_pk,
 			commit: commitment.clone(),
 			enc_payloads,
 		};
-		Ok((decrypted_payload, peeled_onion))
+		Ok(PeeledOnion {
+			payload: decrypted_payload,
+			onion: peeled_onion,
+		})
 	}
 }
 
-fn calc_blinding_factor(
-	shared_secret: &SharedSecret,
-	ephemeral_pubkey: &xPublicKey,
-) -> Result<StaticSecret, OnionError> {
-	let mut hasher = Sha256::default();
-	hasher.update(ephemeral_pubkey.as_bytes());
-	hasher.update(shared_secret.as_bytes());
-	let hashed: [u8; 32] = hasher
-		.finalize()
-		.as_slice()
-		.try_into()
-		.map_err(|_| InvalidKeyLength)?;
-
-	Ok(StaticSecret::from(hashed))
-}
-
-fn new_stream_cipher(shared_secret: &SharedSecret) -> Result<ChaCha20, OnionError> {
+pub fn new_stream_cipher(shared_secret: &SharedSecret) -> Result<ChaCha20, OnionError> {
 	let mut mu_hmac = HmacSha256::new_from_slice(b"MWIXNET")?;
 	mu_hmac.update(shared_secret.as_bytes());
 	let mukey = mu_hmac.finalize().into_bytes();
@@ -152,8 +190,7 @@ impl Writeable for Onion {
 
 impl Readable for Onion {
 	fn read<R: Reader>(reader: &mut R) -> Result<Onion, ser::Error> {
-		let pubkey_bytes: [u8; 32] =
-			vec_to_32_byte_arr(reader.read_fixed_bytes(32)?).map_err(|_| ser::Error::CountError)?;
+		let pubkey_bytes: [u8; 32] = vec_to_array(&reader.read_fixed_bytes(32)?)?;
 		let ephemeral_pubkey = xPublicKey::from(pubkey_bytes);
 		let commit = Commitment::read(reader)?;
 		let mut enc_payloads: Vec<RawBytes> = Vec::new();
@@ -224,9 +261,9 @@ impl<'de> serde::de::Deserialize<'de> for Onion {
 							let vec =
 								grin_util::from_hex(&val).map_err(serde::de::Error::custom)?;
 							pubkey =
-								Some(xPublicKey::from(vec_to_32_byte_arr(vec).map_err(|_| {
-									serde::de::Error::custom("Invalid length pubkey")
-								})?));
+								Some(xPublicKey::from(vec_to_array::<32>(&vec).map_err(
+									|_| serde::de::Error::custom("Invalid length pubkey"),
+								)?));
 						}
 						Field::Commit => {
 							let val: String = map.next_value()?;
@@ -279,148 +316,48 @@ pub enum OnionError {
 
 impl From<InvalidLength> for OnionError {
 	fn from(_err: InvalidLength) -> OnionError {
-		InvalidKeyLength
+		OnionError::InvalidKeyLength
 	}
 }
 
 impl From<ser::Error> for OnionError {
 	fn from(err: ser::Error) -> OnionError {
-		SerializationError(err)
-	}
-}
-
-#[cfg(test)]
-pub mod test_util {
-	use super::{Onion, OnionError, RawBytes};
-	use crate::secp::test_util::{rand_commit, rand_proof};
-	use crate::secp::{random_secret, Commitment, SecretKey};
-	use crate::types::Payload;
-
-	use chacha20::cipher::StreamCipher;
-	use grin_core::core::FeeFields;
-	use rand::{thread_rng, RngCore};
-	use x25519_dalek::PublicKey as xPublicKey;
-	use x25519_dalek::{SharedSecret, StaticSecret};
-
-	#[derive(Clone)]
-	pub struct Hop {
-		pub pubkey: xPublicKey,
-		pub payload: Payload,
-	}
-	/*
-	Choose random xi for each node ni and create a Payload (Pi) for each containing xi
-	Build a rangeproof for Cn=Cin+(Σx1...n)*G and include it in payload Pn
-	Choose random initial ephemeral keypair (r1, R1)
-	Derive remaining ephemeral keypairs such that ri+1=ri*Sha256(Ri||si) where si=ECDH(Ri, Ki)
-	For each node ni, use ChaCha20 stream cipher with key=HmacSha256("MWIXNET"||si) and nonce "NONCE1234567" to encrypt payloads Pi...n
-	 */
-
-	/// Create an Onion for the Commitment, encrypting the payload for each hop
-	pub fn create_onion(commitment: &Commitment, hops: &Vec<Hop>) -> Result<Onion, OnionError> {
-		let initial_key = StaticSecret::new(&mut thread_rng());
-		let mut ephemeral_key = initial_key.clone();
-
-		let mut shared_secrets: Vec<SharedSecret> = Vec::new();
-		let mut enc_payloads: Vec<RawBytes> = Vec::new();
-		for hop in hops {
-			let shared_secret = ephemeral_key.diffie_hellman(&hop.pubkey);
-
-			let ephemeral_pubkey = xPublicKey::from(&ephemeral_key);
-			let blinding_factor = super::calc_blinding_factor(&shared_secret, &ephemeral_pubkey)?;
-
-			shared_secrets.push(shared_secret);
-			enc_payloads.push(hop.payload.serialize()?);
-			ephemeral_key = StaticSecret::from(
-				*ephemeral_key
-					.diffie_hellman(&xPublicKey::from(&blinding_factor))
-					.as_bytes(),
-			);
-		}
-
-		for i in (0..shared_secrets.len()).rev() {
-			let mut cipher = super::new_stream_cipher(&shared_secrets[i])?;
-			for j in i..shared_secrets.len() {
-				cipher.apply_keystream(&mut enc_payloads[j]);
-			}
-		}
-
-		let onion = Onion {
-			ephemeral_pubkey: xPublicKey::from(&initial_key),
-			commit: commitment.clone(),
-			enc_payloads,
-		};
-		Ok(onion)
-	}
-
-	pub fn rand_onion() -> Onion {
-		let commit = rand_commit();
-		let mut hops = Vec::new();
-		let k = (thread_rng().next_u64() % 5) + 1;
-		for i in 0..k {
-			let hop = Hop {
-				pubkey: xPublicKey::from(random_secret().0),
-				payload: Payload {
-					excess: random_secret(),
-					fee: FeeFields::from(thread_rng().next_u32()),
-					rangeproof: if i == (k - 1) {
-						Some(rand_proof())
-					} else {
-						None
-					},
-				},
-			};
-			hops.push(hop);
-		}
-
-		create_onion(&commit, &hops).unwrap()
-	}
-
-	/// Calculates the expected next ephemeral pubkey after peeling a layer off of the Onion.
-	pub fn next_ephemeral_pubkey(
-		onion: &Onion,
-		server_key: &SecretKey,
-	) -> Result<xPublicKey, OnionError> {
-		let shared_secret =
-			StaticSecret::from(server_key.0.clone()).diffie_hellman(&onion.ephemeral_pubkey);
-		let blinding_factor = super::calc_blinding_factor(&shared_secret, &onion.ephemeral_pubkey)?;
-		let mul = blinding_factor.diffie_hellman(&onion.ephemeral_pubkey);
-		Ok(xPublicKey::from(&StaticSecret::from(*mul.as_bytes())))
+		OnionError::SerializationError(err)
 	}
 }
 
 #[cfg(test)]
 pub mod tests {
-	use super::test_util::{self, Hop};
-	use crate::secp;
-	use crate::types::Payload;
+	use super::*;
+	use crate::crypto::secp::random_secret;
+	use crate::{new_hop, Hop};
 
 	use grin_core::core::FeeFields;
-	use x25519_dalek::{PublicKey as xPublicKey, StaticSecret};
 
 	/// Test end-to-end Onion creation and unwrapping logic.
 	#[test]
 	fn onion() {
 		let total_fee: u64 = 10;
-		let fee_per_hop: u64 = 2;
+		let fee_per_hop: u32 = 2;
 		let in_value: u64 = 1000;
 		let out_value: u64 = in_value - total_fee;
-		let blind = secp::random_secret();
+		let blind = random_secret();
 		let commitment = secp::commit(in_value, &blind).unwrap();
 
 		let mut hops: Vec<Hop> = Vec::new();
-		let mut keys: Vec<secp::SecretKey> = Vec::new();
+		let mut keys: Vec<SecretKey> = Vec::new();
 		let mut final_commit = secp::commit(out_value, &blind).unwrap();
 		let mut final_blind = blind.clone();
 		for i in 0..5 {
-			keys.push(secp::random_secret());
+			keys.push(random_secret());
 
-			let excess = secp::random_secret();
+			let excess = random_secret();
 
 			let secp = secp256k1zkp::Secp256k1::with_caps(secp256k1zkp::ContextFlag::Commit);
 			final_blind.add_assign(&secp, &excess).unwrap();
 			final_commit = secp::add_excess(&final_commit, &excess).unwrap();
 			let proof = if i == 4 {
-				let n1 = secp::random_secret();
+				let n1 = random_secret();
 				let rp = secp.bullet_proof(
 					out_value,
 					final_blind.clone(),
@@ -435,34 +372,26 @@ pub mod tests {
 				None
 			};
 
-			hops.push(Hop {
-				pubkey: xPublicKey::from(&StaticSecret::from(keys[i].0.clone())),
-				payload: Payload {
-					excess,
-					fee: FeeFields::from(fee_per_hop as u32),
-					rangeproof: proof,
-				},
-			});
+			let hop = new_hop(&keys[i], &excess, fee_per_hop, proof);
+			hops.push(hop);
 		}
 
 		let mut onion_packet = test_util::create_onion(&commitment, &hops).unwrap();
 
 		let mut payload = Payload {
-			excess: secp::random_secret(),
+			next_ephemeral_pk: onion_packet.ephemeral_pubkey.clone(),
+			excess: random_secret(),
 			fee: FeeFields::from(fee_per_hop as u32),
 			rangeproof: None,
 		};
 		for i in 0..5 {
 			let peeled = onion_packet.peel_layer(&keys[i]).unwrap();
-			payload = peeled.0;
-			onion_packet = peeled.1;
+			payload = peeled.payload;
+			onion_packet = peeled.onion;
 		}
 
 		assert!(payload.rangeproof.is_some());
-		assert_eq!(
-			payload.rangeproof.unwrap(),
-			hops[4].payload.rangeproof.unwrap()
-		);
+		assert_eq!(payload.rangeproof.unwrap(), hops[4].rangeproof.unwrap());
 		assert_eq!(secp::commit(out_value, &final_blind).unwrap(), final_commit);
 		assert_eq!(payload.fee, FeeFields::from(fee_per_hop as u32));
 	}

@@ -1,7 +1,7 @@
-use crate::onion::Onion;
-use crate::secp::{self, Commitment, RangeProof, SecretKey};
-use crate::types::{read_optional, write_optional};
 use grin_core::core::hash::Hash;
+use grin_onion::crypto::secp::{self, Commitment, RangeProof, SecretKey};
+use grin_onion::onion::Onion;
+use grin_onion::util::{read_optional, write_optional};
 
 use grin_core::core::Input;
 use grin_core::ser::{
@@ -23,6 +23,7 @@ pub enum SwapStatus {
 	Unprocessed,
 	InProcess { kernel_hash: Hash },
 	Completed { kernel_hash: Hash, block_hash: Hash },
+	Failed,
 }
 
 impl Writeable for SwapStatus {
@@ -42,6 +43,9 @@ impl Writeable for SwapStatus {
 				writer.write_u8(2)?;
 				kernel_hash.write(writer)?;
 				block_hash.write(writer)?;
+			}
+			SwapStatus::Failed => {
+				writer.write_u8(3)?;
 			}
 		};
 
@@ -65,6 +69,7 @@ impl Readable for SwapStatus {
 					block_hash,
 				}
 			}
+			3 => SwapStatus::Failed,
 			_ => {
 				return Err(ser::Error::CorruptedData);
 			}
@@ -239,12 +244,12 @@ impl SwapStore {
 
 #[cfg(test)]
 mod tests {
-	use crate::onion::test_util::rand_onion;
-	use crate::secp::test_util::{rand_commit, rand_hash, rand_proof};
 	use crate::store::{SwapData, SwapStatus, SwapStore};
-	use crate::{secp, StoreError};
+	use crate::StoreError;
 	use grin_core::core::{Input, OutputFeatures};
 	use grin_core::global::{self, ChainTypes};
+	use grin_onion::crypto::secp;
+	use grin_onion::test_util as onion_test_util;
 	use rand::RngCore;
 	use std::cmp::Ordering;
 
@@ -258,11 +263,11 @@ mod tests {
 	fn rand_swap_with_status(status: SwapStatus) -> SwapData {
 		SwapData {
 			excess: secp::random_secret(),
-			output_commit: rand_commit(),
-			rangeproof: Some(rand_proof()),
-			input: Input::new(OutputFeatures::Plain, rand_commit()),
+			output_commit: onion_test_util::rand_commit(),
+			rangeproof: Some(onion_test_util::rand_proof()),
+			input: Input::new(OutputFeatures::Plain, onion_test_util::rand_commit()),
 			fee: rand::thread_rng().next_u64(),
-			onion: rand_onion(),
+			onion: onion_test_util::rand_onion(),
 			status,
 		}
 	}
@@ -273,12 +278,12 @@ mod tests {
 			SwapStatus::Unprocessed
 		} else if s == 1 {
 			SwapStatus::InProcess {
-				kernel_hash: rand_hash(),
+				kernel_hash: onion_test_util::rand_hash(),
 			}
 		} else {
 			SwapStatus::Completed {
-				kernel_hash: rand_hash(),
-				block_hash: rand_hash(),
+				kernel_hash: onion_test_util::rand_hash(),
+				block_hash: onion_test_util::rand_hash(),
 			}
 		};
 		rand_swap_with_status(status)
@@ -325,7 +330,7 @@ mod tests {
 		assert!(store.swap_exists(&swap.input.commit)?);
 
 		swap.status = SwapStatus::InProcess {
-			kernel_hash: rand_hash(),
+			kernel_hash: onion_test_util::rand_hash(),
 		};
 		let result = store.save_swap(&swap, false);
 		assert_eq!(

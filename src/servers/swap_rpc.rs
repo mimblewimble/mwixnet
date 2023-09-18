@@ -1,11 +1,12 @@
+use crate::client::MixClient;
 use crate::config::ServerConfig;
 use crate::node::GrinNode;
-use crate::onion::Onion;
-use crate::secp::{self, ComSignature};
-use crate::server::{Server, ServerImpl, SwapError};
+use crate::servers::swap::{SwapError, SwapServer, SwapServerImpl};
 use crate::store::SwapStore;
 use crate::wallet::Wallet;
 
+use grin_onion::crypto::comsig::{self, ComSignature};
+use grin_onion::onion::Onion;
 use grin_util::StopState;
 use jsonrpc_core::Value;
 use jsonrpc_derive::rpc;
@@ -19,31 +20,27 @@ use std::time::Duration;
 #[derive(Serialize, Deserialize)]
 pub struct SwapReq {
 	onion: Onion,
-	#[serde(with = "secp::comsig_serde")]
+	#[serde(with = "comsig::comsig_serde")]
 	comsig: ComSignature,
 }
 
 #[rpc(server)]
-pub trait API {
+pub trait SwapAPI {
 	#[rpc(name = "swap")]
 	fn swap(&self, swap: SwapReq) -> jsonrpc_core::Result<Value>;
-
-	// milestone 3: Used by mwixnet coinswap servers to communicate with each other
-	// fn derive_outputs(&self, entries: Vec<Onion>) -> jsonrpc_core::Result<Value>;
-	// fn derive_kernel(&self, tx: Tx) -> jsonrpc_core::Result<Value>;
 }
 
 #[derive(Clone)]
-struct RPCServer {
+struct RPCSwapServer {
 	server_config: ServerConfig,
-	server: Arc<Mutex<dyn Server>>,
+	server: Arc<Mutex<dyn SwapServer>>,
 }
 
-impl RPCServer {
+impl RPCSwapServer {
 	/// Spin up an instance of the JSON-RPC HTTP server.
 	fn start_http(&self) -> jsonrpc_http_server::Server {
 		let mut io = IoHandler::new();
-		io.extend_with(RPCServer::to_delegate(self.clone()));
+		io.extend_with(RPCSwapServer::to_delegate(self.clone()));
 
 		ServerBuilder::new(io)
 			.cors(DomainsValidation::Disabled)
@@ -72,8 +69,7 @@ impl From<SwapError> for Error {
 	}
 }
 
-impl API for RPCServer {
-	/// Implements the 'swap' API
+impl SwapAPI for RPCSwapServer {
 	fn swap(&self, swap: SwapReq) -> jsonrpc_core::Result<Value> {
 		self.server
 			.lock()
@@ -86,15 +82,22 @@ impl API for RPCServer {
 /// Spin up the JSON-RPC web server
 pub fn listen(
 	server_config: ServerConfig,
+	next_server: Option<Arc<dyn MixClient>>,
 	wallet: Arc<dyn Wallet>,
 	node: Arc<dyn GrinNode>,
 	store: SwapStore,
 	stop_state: Arc<StopState>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-	let server = ServerImpl::new(server_config.clone(), wallet.clone(), node.clone(), store);
+	let server = SwapServerImpl::new(
+		server_config.clone(),
+		next_server,
+		wallet.clone(),
+		node.clone(),
+		store,
+	);
 	let server = Arc::new(Mutex::new(server));
 
-	let rpc_server = RPCServer {
+	let rpc_server = RPCSwapServer {
 		server_config: server_config.clone(),
 		server: server.clone(),
 	};
@@ -128,12 +131,13 @@ pub fn listen(
 #[cfg(test)]
 mod tests {
 	use crate::config::ServerConfig;
-	use crate::onion::test_util;
-	use crate::rpc::{RPCServer, SwapReq};
-	use crate::secp::{self, ComSignature};
-	use crate::server::mock::MockServer;
-	use crate::server::{Server, SwapError};
+	use crate::crypto::comsig::ComSignature;
+	use crate::crypto::secp;
+	use crate::servers::swap::mock::MockSwapServer;
+	use crate::servers::swap::{SwapError, SwapServer};
+	use crate::servers::swap_rpc::{RPCSwapServer, SwapReq};
 
+	use grin_onion::create_onion;
 	use std::net::TcpListener;
 	use std::sync::{Arc, Mutex};
 
@@ -147,20 +151,23 @@ mod tests {
 
 	/// Spin up a temporary web service, query the API, then cleanup and return response
 	fn make_request(
-		server: Arc<Mutex<dyn Server>>,
+		server: Arc<Mutex<dyn SwapServer>>,
 		req: String,
 	) -> Result<String, Box<dyn std::error::Error>> {
 		let server_config = ServerConfig {
 			key: secp::random_secret(),
 			interval_s: 1,
 			addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
+			socks_proxy_addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
 			grin_node_url: "127.0.0.1:3413".parse()?,
 			grin_node_secret_path: None,
 			wallet_owner_url: "127.0.0.1:3420".parse()?,
 			wallet_owner_secret_path: None,
+			prev_server: None,
+			next_server: None,
 		};
 
-		let rpc_server = RPCServer {
+		let rpc_server = RPCSwapServer {
 			server_config: server_config.clone(),
 			server: server.clone(),
 		};
@@ -201,20 +208,19 @@ mod tests {
 	#[test]
 	fn swap_success() -> Result<(), Box<dyn std::error::Error>> {
 		let commitment = secp::commit(1234, &secp::random_secret())?;
-		let onion = test_util::create_onion(&commitment, &vec![])?;
+		let onion = create_onion(&commitment, &vec![])?;
 		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
 		let swap = SwapReq {
 			onion: onion.clone(),
 			comsig,
 		};
 
-		let server: Arc<Mutex<dyn Server>> = Arc::new(Mutex::new(MockServer::new()));
+		let server: Arc<Mutex<dyn SwapServer>> = Arc::new(Mutex::new(MockSwapServer::new()));
 
 		let req = format!(
 			"{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}",
 			serde_json::json!(swap)
 		);
-		println!("Request: {}", req);
 		let response = make_request(server, req)?;
 		let expected = "{\"jsonrpc\":\"2.0\",\"result\":\"success\",\"id\":\"1\"}\n";
 		assert_eq!(response, expected);
@@ -224,7 +230,7 @@ mod tests {
 
 	#[test]
 	fn swap_bad_request() -> Result<(), Box<dyn std::error::Error>> {
-		let server: Arc<Mutex<dyn Server>> = Arc::new(Mutex::new(MockServer::new()));
+		let server: Arc<Mutex<dyn SwapServer>> = Arc::new(Mutex::new(MockSwapServer::new()));
 
 		let params = "{ \"param\": \"Not a valid Swap request\" }";
 		let req = format!(
@@ -241,21 +247,21 @@ mod tests {
 	#[test]
 	fn swap_utxo_missing() -> Result<(), Box<dyn std::error::Error>> {
 		let commitment = secp::commit(1234, &secp::random_secret())?;
-		let onion = test_util::create_onion(&commitment, &vec![])?;
+		let onion = create_onion(&commitment, &vec![])?;
 		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
 		let swap = SwapReq {
 			onion: onion.clone(),
 			comsig,
 		};
 
-		let mut server = MockServer::new();
+		let mut server = MockSwapServer::new();
 		server.set_response(
 			&onion,
 			SwapError::CoinNotFound {
 				commit: commitment.clone(),
 			},
 		);
-		let server: Arc<Mutex<dyn Server>> = Arc::new(Mutex::new(server));
+		let server: Arc<Mutex<dyn SwapServer>> = Arc::new(Mutex::new(server));
 
 		let req = format!(
 			"{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}",
@@ -263,9 +269,9 @@ mod tests {
 		);
 		let response = make_request(server, req)?;
 		let expected = format!(
-			"{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":-32602,\"message\":\"Output {:?} does not exist, or is already spent.\"}},\"id\":\"1\"}}\n",
-			commitment
-		);
+            "{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":-32602,\"message\":\"Output {:?} does not exist, or is already spent.\"}},\"id\":\"1\"}}\n",
+            commitment
+        );
 		assert_eq!(response, expected);
 		Ok(())
 	}

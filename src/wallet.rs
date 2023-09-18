@@ -1,19 +1,16 @@
-use crate::secp;
+use crate::crypto::secp;
 
 use grin_api::client;
 use grin_api::json_rpc::{build_request, Request, Response};
-use grin_core::core::{
-	FeeFields, Input, Inputs, KernelFeatures, Output, Transaction, TransactionBody, TxKernel,
-};
+use grin_core::core::Output;
 use grin_core::libtx::secp_ser;
 use grin_keychain::BlindingFactor;
 use grin_util::{ToHex, ZeroingString};
 use grin_wallet_api::{EncryptedRequest, EncryptedResponse, JsonId, Token};
-use secp256k1zkp::{ContextFlag, PublicKey, Secp256k1, SecretKey};
+use secp256k1zkp::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use thiserror::Error;
 
 pub trait Wallet: Send + Sync {
@@ -24,18 +21,6 @@ pub trait Wallet: Send + Sync {
 /// Error types for interacting with wallets
 #[derive(Error, Debug)]
 pub enum WalletError {
-	#[error("Error building kernel's fee fields: {0:?}")]
-	KernelFeeError(grin_core::core::transaction::Error),
-	#[error("Error computing kernel's excess: {0:?}")]
-	KernelExcessError(secp256k1zkp::Error),
-	#[error("Error computing kernel's signature message: {0:?}")]
-	KernelSigMessageError(grin_core::core::transaction::Error),
-	#[error("Error signing kernel: {0:?}")]
-	KernelSigError(secp256k1zkp::Error),
-	#[error("Built kernel failed to verify: {0:?}")]
-	KernelVerifyError(grin_core::core::transaction::Error),
-	#[error("Output blinding factor is invalid: {0:?}")]
-	OutputBlindError(secp256k1zkp::Error),
 	#[error("Error encrypting request: {0:?}")]
 	EncryptRequestError(grin_wallet_libwallet::Error),
 	#[error("Error decrypting response: {0:?}")]
@@ -46,67 +31,6 @@ pub enum WalletError {
 	ApiCommError(grin_api::Error),
 	#[error("Error decoding JSON-RPC response: {0:?}")]
 	ResponseParseError(grin_api::json_rpc::Error),
-}
-
-/// Builds and verifies a 'Transaction' using the provided components.
-pub fn assemble_tx(
-	wallet: &Arc<dyn Wallet>,
-	inputs: &Vec<Input>,
-	outputs: &Vec<Output>,
-	fee_base: u64,
-	total_fee: u64,
-	excesses: &Vec<SecretKey>,
-) -> Result<Transaction, WalletError> {
-	let secp = Secp256k1::with_caps(ContextFlag::Commit);
-	let txn_inputs = Inputs::from(inputs.as_slice());
-	let mut txn_outputs = outputs.clone();
-	let mut txn_excesses = excesses.clone();
-	let mut kernel_fee = total_fee;
-
-	// calculate fee required if we add our own output
-	let fee_required =
-		TransactionBody::weight_by_iok(inputs.len() as u64, (outputs.len() + 1) as u64, 1)
-			* fee_base;
-
-	// calculate fee to spend the output to ensure there's enough leftover to cover the fees for spending it
-	let fee_to_spend = TransactionBody::weight_by_iok(1, 0, 0) * fee_base;
-
-	// collect any leftover fees
-	if total_fee > fee_required + fee_to_spend {
-		let amount = total_fee - fee_required;
-		kernel_fee -= amount;
-
-		let wallet_output = wallet.build_output(amount)?;
-		txn_outputs.push(wallet_output.1);
-
-		let output_excess = SecretKey::from_slice(&secp, &wallet_output.0.as_ref())
-			.map_err(WalletError::OutputBlindError)?;
-		txn_excesses.push(output_excess);
-	}
-
-	// generate random transaction offset
-	let offset = secp::random_secret();
-
-	// calculate kernel excess
-	let kern_excess = secp
-		.blind_sum(txn_excesses, vec![offset.clone()])
-		.map_err(WalletError::KernelExcessError)?;
-
-	// build and verify kernel
-	let mut kernel = TxKernel::with_features(KernelFeatures::Plain {
-		fee: FeeFields::new(0, kernel_fee).map_err(WalletError::KernelFeeError)?,
-	});
-	let msg = kernel
-		.msg_to_sign()
-		.map_err(WalletError::KernelSigMessageError)?;
-	kernel.excess = secp::commit(0, &kern_excess).map_err(WalletError::KernelExcessError)?;
-	kernel.excess_sig = secp::sign(&kern_excess, &msg).map_err(WalletError::KernelSigError)?;
-	kernel.verify().map_err(WalletError::KernelVerifyError)?;
-
-	// assemble the transaction
-	let tx = Transaction::new(txn_inputs, &txn_outputs, &[kernel])
-		.with_offset(BlindingFactor::from_secret_key(offset));
-	Ok(tx)
 }
 
 /// HTTP (JSONRPC) implementation of the 'Wallet' trait.
@@ -272,15 +196,34 @@ impl Wallet for HttpWallet {
 #[cfg(test)]
 pub mod mock {
 	use super::{Wallet, WalletError};
-	use crate::secp;
+	use crate::crypto::secp;
+	use std::borrow::BorrowMut;
 
 	use grin_core::core::{Output, OutputFeatures};
 	use grin_keychain::BlindingFactor;
+	use secp256k1zkp::pedersen::Commitment;
 	use secp256k1zkp::Secp256k1;
+	use std::sync::{Arc, Mutex};
 
-	/// HTTP (JSONRPC) implementation of the 'Wallet' trait.
+	/// Mock implementation of the 'Wallet' trait for unit-tests.
 	#[derive(Clone)]
-	pub struct MockWallet {}
+	pub struct MockWallet {
+		built_outputs: Arc<Mutex<Vec<Commitment>>>,
+	}
+
+	impl MockWallet {
+		/// Creates a new, empty MockWallet.
+		pub fn new() -> Self {
+			MockWallet {
+				built_outputs: Arc::new(Mutex::new(Vec::new())),
+			}
+		}
+
+		/// Returns the commitments of all outputs built for the wallet.
+		pub fn built_outputs(&self) -> Vec<Commitment> {
+			self.built_outputs.lock().unwrap().clone()
+		}
+	}
 
 	impl Wallet for MockWallet {
 		/// Builds an 'Output' for the wallet using the 'build_output' RPC API.
@@ -297,6 +240,10 @@ pub mod mock {
 				None,
 			);
 			let output = Output::new(OutputFeatures::Plain, commit.clone(), proof);
+
+			let mut locked = self.built_outputs.lock().unwrap();
+			locked.borrow_mut().push(output.commitment().clone());
+
 			Ok((BlindingFactor::from_secret_key(blind), output))
 		}
 	}
