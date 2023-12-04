@@ -114,8 +114,12 @@ impl HttpGrinNode {
 		let url = format!("http://{}{}", self.node_url, ENDPOINT);
 		let req = build_request(method, params);
 		let res =
-			client::post::<Request, Response>(url.as_str(), self.node_api_secret.clone(), &req)
-				.map_err(NodeError::ApiCommError)?;
+			client::post::<Request, Response>(
+				url.as_str(),
+				self.node_api_secret.clone(),
+				&req,
+				client::TimeOut::default()
+			).map_err(NodeError::ApiCommError)?;
 		let parsed = res
 			.clone()
 			.into_result()

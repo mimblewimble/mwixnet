@@ -6,6 +6,7 @@ use crate::{tor, DalekPublicKey};
 use grin_onion::onion::Onion;
 
 use grin_api::client;
+use grin_api::client::TimeOut;
 use grin_api::json_rpc::build_request;
 use grin_core::ser;
 use grin_core::ser::ProtocolVersion;
@@ -75,7 +76,7 @@ impl MixClientImpl {
 			req.headers_mut().extend(headers.clone().into_iter());
 		}
 
-		let res = client::send_request(req).map_err(ClientError::API)?;
+		let res = client::send_request(req, TimeOut::default()).map_err(ClientError::API)?;
 
 		serde_json::from_str(&res).map_err(ClientError::ResponseParse)
 	}
