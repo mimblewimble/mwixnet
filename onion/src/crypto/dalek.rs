@@ -162,7 +162,7 @@ pub fn sign(sk: &SecretKey, message: &[u8]) -> Result<DalekSignature, DalekError
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::crypto::dalek::test_util::rand_keypair;
+	use crate::test_util::rand_keypair;
 	use grin_core::ser::{self, ProtocolVersion};
 	use grin_util::ToHex;
 	use rand::Rng;

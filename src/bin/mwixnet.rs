@@ -1,33 +1,27 @@
-use config::ServerConfig;
-use node::HttpGrinNode;
-use store::SwapStore;
-use wallet::HttpWallet;
+use mwixnet::config::{self, ServerConfig};
+use mwixnet::node::HttpGrinNode;
+use mwixnet::servers;
+use mwixnet::store::SwapStore;
+use mwixnet::tor;
+use mwixnet::wallet::HttpWallet;
 
-use crate::client::{MixClient, MixClientImpl};
-use crate::node::GrinNode;
-use crate::store::StoreError;
 use clap::App;
 use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_onion::crypto;
 use grin_onion::crypto::dalek::DalekPublicKey;
 use grin_util::{StopState, ZeroingString};
+use mwixnet::client::{MixClient, MixClientImpl};
+use mwixnet::node::GrinNode;
+use mwixnet::store::StoreError;
 use rpassword;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::runtime::Runtime;
+use std::thread::{sleep, spawn};
+use std::time::Duration;
 
 #[macro_use]
 extern crate clap;
-
-mod client;
-mod config;
-mod node;
-mod servers;
-mod store;
-mod tor;
-mod tx;
-mod wallet;
 
 const DEFAULT_INTERVAL: u32 = 12 * 60 * 60;
 
@@ -37,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {
-	let yml = load_yaml!("../mwixnet.yml");
+	let yml = load_yaml!("mwixnet.yml");
 	let args = App::from_yaml(yml).get_matches();
 	let chain_type = if args.is_present("testnet") {
 		ChainTypes::Testnet
@@ -168,18 +162,22 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	);
 
 	// Node API health check
-	if let Err(e) = node.get_chain_height() {
+	let mut rt = tokio::runtime::Builder::new()
+		.threaded_scheduler()
+		.enable_all()
+		.build()?;
+	if let Err(e) = rt.block_on(node.async_get_chain_height()) {
 		eprintln!("Node communication failure. Is node listening?");
 		return Err(e.into());
 	};
 
 	// Open wallet
 	let wallet_pass = prompt_wallet_password(&args.value_of("wallet_pass"));
-	let wallet = HttpWallet::open_wallet(
+	let wallet = rt.block_on(HttpWallet::async_open_wallet(
 		&server_config.wallet_owner_url,
 		&server_config.wallet_owner_api_secret(),
 		&wallet_pass,
-	);
+	));
 	let wallet = match wallet {
 		Ok(w) => w,
 		Err(e) => {
@@ -188,12 +186,14 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		}
 	};
 
-	let mut tor_process = tor::init_tor_listener(&server_config)?;
+	let mut tor_process = tor::init_tor_listener(
+		&config::get_grin_path(&chain_type).to_str().unwrap(),
+		&server_config,
+	)?;
 
 	let stop_state = Arc::new(StopState::new());
 	let stop_state_clone = stop_state.clone();
 
-	let rt = Runtime::new()?;
 	rt.spawn(async move {
 		futures::executor::block_on(build_signals_fut());
 		let _ = tor_process.kill();
@@ -213,13 +213,26 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			server_config.server_pubkey().to_hex()
 		);
 
-		servers::mix_rpc::listen(
+		let (_, http_server) = servers::mix_rpc::listen(
+			rt.handle(),
 			server_config,
 			next_mixer,
 			Arc::new(wallet),
 			Arc::new(node),
-			stop_state,
-		)
+		)?;
+
+		let close_handle = http_server.close_handle();
+		let round_handle = spawn(move || loop {
+			if stop_state.is_stopped() {
+				close_handle.close();
+				break;
+			}
+
+			sleep(Duration::from_millis(100));
+		});
+
+		http_server.wait();
+		round_handle.join().unwrap();
 	} else {
 		println!(
 			"Starting SWAP server with public key {:?}",
@@ -237,15 +250,40 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		)?;
 
 		// Start the mwixnet JSON-RPC HTTP 'swap' server
-		servers::swap_rpc::listen(
-			server_config,
+		let (swap_server, http_server) = servers::swap_rpc::listen(
+			rt.handle(),
+			&server_config,
 			next_mixer,
 			Arc::new(wallet),
 			Arc::new(node),
 			store,
-			stop_state,
-		)
+		)?;
+
+		let close_handle = http_server.close_handle();
+		let round_handle = spawn(move || {
+			let mut secs = 0;
+			loop {
+				if stop_state.is_stopped() {
+					close_handle.close();
+					break;
+				}
+
+				sleep(Duration::from_secs(1));
+				secs = (secs + 1) % server_config.interval_s;
+
+				if secs == 0 {
+					let server = swap_server.clone();
+					rt.spawn(async move { server.lock().await.execute_round().await });
+					//let _ = swap_server.lock().unwrap().execute_round();
+				}
+			}
+		});
+
+		http_server.wait();
+		round_handle.join().unwrap();
 	}
+
+	Ok(())
 }
 
 #[cfg(unix)]

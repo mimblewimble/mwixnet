@@ -1,9 +1,12 @@
 use crate::client::MixClient;
 use crate::config::ServerConfig;
-use crate::tx::TxComponents;
+use crate::node::{self, GrinNode};
+use crate::tx::{self, TxComponents};
 use crate::wallet::Wallet;
-use crate::{node, tx, GrinNode};
 
+use crate::servers::mix_rpc::MixResp;
+use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use grin_core::core::{Output, OutputFeatures, TransactionBody};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
 use grin_core::ser;
@@ -47,13 +50,14 @@ pub enum MixError {
 }
 
 /// An internal MWixnet server - a "Mixer"
+#[async_trait]
 pub trait MixServer: Send + Sync {
 	/// Swaps the outputs provided and returns the final swapped outputs and kernels.
-	fn mix_outputs(
+	async fn mix_outputs(
 		&self,
 		onions: &Vec<Onion>,
 		sig: &DalekSignature,
-	) -> Result<(Vec<usize>, TxComponents), MixError>;
+	) -> Result<MixResp, MixError>;
 }
 
 /// The standard MWixnet "Mixer" implementation
@@ -130,15 +134,19 @@ impl MixServerImpl {
 		Ok(peeled)
 	}
 
-	fn build_final_outputs(
+	async fn async_build_final_outputs(
 		&self,
 		peeled: &Vec<(usize, PeeledOnion)>,
-	) -> Result<(Vec<usize>, TxComponents), MixError> {
+	) -> Result<MixResp, MixError> {
 		// Filter out commitments that already exist in the UTXO set
-		let filtered: Vec<&(usize, PeeledOnion)> = peeled
-			.iter()
-			.filter(|(_, p)| !node::is_unspent(&self.node, &p.onion.commit).unwrap_or(true))
-			.collect();
+		let filtered: Vec<&(usize, PeeledOnion)> = stream::iter(peeled.iter())
+			.filter(|(_, p)| async {
+				!node::async_is_unspent(&self.node, &p.onion.commit)
+					.await
+					.unwrap_or(true)
+			})
+			.collect()
+			.await;
 
 		// Build plain outputs for each mix entry
 		let outputs: Vec<Output> = filtered
@@ -158,7 +166,7 @@ impl MixServerImpl {
 			.map(|(_, p)| p.payload.excess.clone())
 			.collect();
 
-		let components = tx::assemble_components(
+		let components = tx::async_assemble_components(
 			&self.wallet,
 			&TxComponents {
 				offset: ZERO_KEY,
@@ -169,17 +177,21 @@ impl MixServerImpl {
 			self.get_fee_base(),
 			fees_paid,
 		)
+		.await
 		.map_err(MixError::TxError)?;
 
 		let indices = filtered.iter().map(|(i, _)| *i).collect();
 
-		Ok((indices, components))
+		Ok(MixResp {
+			indices,
+			components,
+		})
 	}
 
-	fn call_next_mixer(
+	async fn call_next_mixer(
 		&self,
 		peeled: &Vec<(usize, PeeledOnion)>,
-	) -> Result<(Vec<usize>, TxComponents), MixError> {
+	) -> Result<MixResp, MixError> {
 		// Sort by commitment
 		let mut onions_with_index = peeled.clone();
 		onions_with_index
@@ -191,15 +203,16 @@ impl MixServerImpl {
 
 		// Call next server
 		let onions = peeled.iter().map(|(_, p)| p.onion.clone()).collect();
-		let (mixed_indices, mixed_components) = self
+		let mixed = self
 			.mix_client
 			.as_ref()
 			.unwrap()
 			.mix_outputs(&onions)
+			.await
 			.map_err(MixError::Client)?;
 
 		// Remove filtered entries
-		let kept_next_indices = HashSet::<_>::from_iter(mixed_indices.clone());
+		let kept_next_indices = HashSet::<_>::from_iter(mixed.indices.clone());
 		let filtered_onions: Vec<&(usize, PeeledOnion)> = onions_with_index
 			.iter()
 			.filter(|(i, _)| {
@@ -221,25 +234,30 @@ impl MixServerImpl {
 
 		let indices = kept_next_indices.into_iter().sorted().collect();
 
-		let components = tx::assemble_components(
+		let components = tx::async_assemble_components(
 			&self.wallet,
-			&mixed_components,
+			&mixed.components,
 			&excesses,
 			self.get_fee_base(),
 			fees_paid,
 		)
+		.await
 		.map_err(MixError::TxError)?;
 
-		Ok((indices, components))
+		Ok(MixResp {
+			indices,
+			components,
+		})
 	}
 }
 
+#[async_trait]
 impl MixServer for MixServerImpl {
-	fn mix_outputs(
+	async fn mix_outputs(
 		&self,
 		onions: &Vec<Onion>,
 		sig: &DalekSignature,
-	) -> Result<(Vec<usize>, TxComponents), MixError> {
+	) -> Result<MixResp, MixError> {
 		// Verify Signature
 		let serialized = ser::ser_vec(&onions, ProtocolVersion::local()).unwrap();
 		sig.verify(
@@ -252,10 +270,10 @@ impl MixServer for MixServerImpl {
 		let mut peeled: Vec<(usize, PeeledOnion)> = onions
 			.iter()
 			.enumerate()
-			.filter_map(|(i, o)| {
-				if let Some(p) = self.peel_onion(&o).ok() {
-					Some((i, p))
-				} else {
+			.filter_map(|(i, o)| match self.peel_onion(&o) {
+				Ok(p) => Some((i, p)),
+				Err(e) => {
+					println!("Error peeling onion: {:?}", e);
 					None
 				}
 			})
@@ -271,9 +289,9 @@ impl MixServer for MixServerImpl {
 		}
 
 		if self.server_config.next_server.is_some() {
-			self.call_next_mixer(&peeled)
+			self.call_next_mixer(&peeled).await
 		} else {
-			self.build_final_outputs(&peeled)
+			self.async_build_final_outputs(&peeled).await
 		}
 	}
 }
@@ -281,11 +299,13 @@ impl MixServer for MixServerImpl {
 #[cfg(test)]
 mod test_util {
 	use crate::client::test_util::DirectMixClient;
+	use crate::client::MixClient;
+	use crate::config;
 	use crate::node::mock::MockGrinNode;
-	use crate::wallet::mock::MockWallet;
-	use crate::{config, DalekPublicKey, MixClient};
-
 	use crate::servers::mix::MixServerImpl;
+	use crate::wallet::mock::MockWallet;
+
+	use grin_onion::crypto::dalek::DalekPublicKey;
 	use secp256k1zkp::SecretKey;
 	use std::sync::Arc;
 
@@ -320,10 +340,11 @@ mod test_util {
 
 #[cfg(test)]
 mod tests {
+	use crate::client::MixClient;
 	use crate::node::mock::MockGrinNode;
-	use crate::{DalekPublicKey, MixClient};
 
 	use ::function_name::named;
+	use grin_onion::crypto::dalek::DalekPublicKey;
 	use grin_onion::crypto::secp::{self, Commitment};
 	use grin_onion::test_util as onion_test_util;
 	use grin_onion::{create_onion, new_hop, Hop};
@@ -373,9 +394,9 @@ mod tests {
 	/// * Swap Server - Simulated by test
 	/// * Mixer 1 - Internal MixServerImpl directly called by test
 	/// * Mixer 2 - Final MixServerImpl called by Mixer 1
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn mix_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+	async fn mix_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
 		init_test!();
 
 		// Setup Input(s)
@@ -426,13 +447,15 @@ mod tests {
 
 		// Simulate the swap server peeling the onion and then calling mix1
 		let mix1_onion = onion.peel_layer(&swap_vars.sk)?;
-		let (mixed_indices, mixed_components) =
-			mixer1_client.mix_outputs(&vec![mix1_onion.onion.clone()])?;
+		let mixed = mixer1_client
+			.mix_outputs(&vec![mix1_onion.onion.clone()])
+			.await?;
 
 		// Verify 3 outputs are returned: mixed output, mixer1's output, and mixer2's output
-		assert_eq!(mixed_indices, vec![0 as usize]);
-		assert_eq!(mixed_components.outputs.len(), 3);
-		let output_commits: HashSet<Commitment> = mixed_components
+		assert_eq!(mixed.indices, vec![0 as usize]);
+		assert_eq!(mixed.components.outputs.len(), 3);
+		let output_commits: HashSet<Commitment> = mixed
+			.components
 			.outputs
 			.iter()
 			.map(|o| o.identifier.commit.clone())

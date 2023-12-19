@@ -330,7 +330,7 @@ impl From<ser::Error> for OnionError {
 pub mod tests {
 	use super::*;
 	use crate::crypto::secp::random_secret;
-	use crate::{new_hop, Hop};
+	use crate::{create_onion, new_hop, Hop};
 
 	use grin_core::core::FeeFields;
 
@@ -376,7 +376,7 @@ pub mod tests {
 			hops.push(hop);
 		}
 
-		let mut onion_packet = test_util::create_onion(&commitment, &hops).unwrap();
+		let mut onion_packet = create_onion(&commitment, &hops).unwrap();
 
 		let mut payload = Payload {
 			next_ephemeral_pk: onion_packet.ephemeral_pubkey.clone(),

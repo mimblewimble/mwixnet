@@ -9,46 +9,57 @@ edition = "2021"
 members = ["onion"]
 
 [dependencies]
+async-std = {  version = "1", features = ["tokio02"] }
+async-trait = "0.1.74"
 blake2 = { package = "blake2-rfc", version = "0.2"}
 byteorder = "1"
-bytes = "0.5.6"
-chacha20 = "0.8.1"
+bytes = "1.5.0"
+chacha20 = "0.9.1"
+chrono = "0.4.31"
 clap = { version = "2.33", features = ["yaml"] }
+ctrlc = { version = "3.1", features = ["termination"] }
 curve25519-dalek = "2.1"
 dirs = "2.0"
 ed25519-dalek = "1.0.1"
 function_name = "0.3.0"
 futures = "0.3"
 hmac = { version = "0.12.0", features = ["std"]}
-hyper = { version = "0.14", features = ["full"] }
+hyper =  "0.13"
 hyper-proxy = "0.9.1"
-itertools = { version = "0.10.3"}
-jsonrpc-core = "18.0"
-jsonrpc-derive = "18.0"
-jsonrpc-http-server = "18.0"
+hyper-socks2 = "0.5.0"
+hyper-timeout = { version = "0.3", features = [] }
+itertools = { version = "0.12.0" }
+jsonrpc-core = "17.1"
+jsonrpc-derive = "17.1"
+jsonrpc-http-server = "17.1"
 lazy_static = "1"
 pbkdf2 = "0.8.0"
 rand = "0.7.3"
+remove_dir_all = "0.8.2"
 ring = "0.16"
 rpassword = "4.0"
 serde = { version = "1", features= ["derive"]}
 serde_derive = "1"
 serde_json = "1"
 sha2 = "0.10.0"
-thiserror = "1.0.31"
-tokio = { version = "1", features = ["full"] }
-toml = "0.5"
+thiserror = "1.0.30"
+tokio = { version = "0.2", features = ["full"] }
+toml = "0.8.8"
 x25519-dalek = "0.6.0"
 grin_onion = { path = "./onion" }
-grin_secp256k1zkp = { version = "0.7.11", features = ["bullet-proof-sizing"]}
-grin_util = "5"
-grin_api = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
-grin_core = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
-grin_chain = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
-grin_keychain = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
-grin_servers = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
-grin_store = { git = "https://github.com/mimblewimble/grin", version = "5.2.0-alpha.1" }
-grin_wallet_api = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
-grin_wallet_impls = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
-grin_wallet_libwallet = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
-grin_wallet_util = { git = "https://github.com/mimblewimble/grin-wallet", branch = "master" }
+grin_secp256k1zkp = { version = "0.7.12", features = ["bullet-proof-sizing"]}
+grin_api = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
+grin_core = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
+grin_chain = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
+grin_keychain = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
+grin_p2p = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
+grin_servers = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
+grin_store = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
+grin_util = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
+grin_wallet_api = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
+grin_wallet_config = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
+grin_wallet_controller = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
+grin_wallet_impls = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
+grin_wallet_libwallet = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
+grin_wallet_util = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
+log = "0.4.20"

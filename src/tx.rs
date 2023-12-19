@@ -1,10 +1,10 @@
-use crate::crypto::secp;
 use crate::wallet::Wallet;
 
 use grin_core::core::{
 	FeeFields, Input, Inputs, KernelFeatures, Output, Transaction, TransactionBody, TxKernel,
 };
 use grin_keychain::BlindingFactor;
+use grin_onion::crypto::secp;
 use secp256k1zkp::{ContextFlag, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -43,7 +43,7 @@ pub struct TxComponents {
 }
 
 /// Builds and verifies the finalized swap 'Transaction' using the provided components.
-pub fn assemble_tx(
+pub async fn async_assemble_tx(
 	wallet: &Arc<dyn Wallet>,
 	inputs: &Vec<Input>,
 	outputs: &Vec<Output>,
@@ -57,7 +57,7 @@ pub fn assemble_tx(
 	let min_kernel_fee =
 		TransactionBody::weight_by_iok(inputs.len() as u64, outputs.len() as u64, 1) * fee_base;
 
-	let components = add_kernel_and_collect_fees(
+	let components = async_add_kernel_and_collect_fees(
 		&wallet,
 		&outputs,
 		&kernels,
@@ -66,7 +66,8 @@ pub fn assemble_tx(
 		fees_paid,
 		&prev_offset,
 		&output_excesses,
-	)?;
+	)
+	.await?;
 
 	// assemble the transaction
 	let tx = Transaction::new(
@@ -79,7 +80,7 @@ pub fn assemble_tx(
 }
 
 /// Adds a kernel and output to a collection of transaction components to consume fees and offset excesses.
-pub fn assemble_components(
+pub async fn async_assemble_components(
 	wallet: &Arc<dyn Wallet>,
 	components: &TxComponents,
 	output_excesses: &Vec<SecretKey>,
@@ -89,7 +90,7 @@ pub fn assemble_components(
 	// calculate minimum fee required for the kernel
 	let min_kernel_fee = TransactionBody::weight_by_iok(0, 0, 1) * fee_base;
 
-	add_kernel_and_collect_fees(
+	async_add_kernel_and_collect_fees(
 		&wallet,
 		&components.outputs,
 		&components.kernels,
@@ -99,9 +100,10 @@ pub fn assemble_components(
 		&components.offset,
 		&output_excesses,
 	)
+	.await
 }
 
-fn add_kernel_and_collect_fees(
+async fn async_add_kernel_and_collect_fees(
 	wallet: &Arc<dyn Wallet>,
 	outputs: &Vec<Output>,
 	kernels: &Vec<TxKernel>,
@@ -128,7 +130,10 @@ fn add_kernel_and_collect_fees(
 		let amount = fees_paid - (min_kernel_fee + fee_to_collect);
 		kernel_fee -= amount;
 
-		let wallet_output = wallet.build_output(amount).map_err(TxError::WalletError)?;
+		let wallet_output = wallet
+			.async_build_output(amount)
+			.await
+			.map_err(TxError::WalletError)?;
 		txn_outputs.push(wallet_output.1);
 
 		let output_excess = SecretKey::from_slice(&secp, &wallet_output.0.as_ref())
@@ -202,11 +207,12 @@ fn add_kernel_and_collect_fees(
 ///
 /// ```rust
 /// use secp256k1zkp::key::SecretKey;
-/// use crate::crypto::secp;
+/// use secp256k1zkp::rand::thread_rng;
+/// use grin_onion::crypto::secp;
 ///
-/// let secret_key = SecretKey::new(&mut secp::rand::thread_rng());
+/// let secret_key = secp::random_secret();
 /// let fee = 10; // 10 nanogrin
-/// let kernel = build_kernel(&secret_key, fee);
+/// let kernel = mwixnet::tx::build_kernel(&secret_key, fee);
 /// ```
 pub fn build_kernel(excess: &SecretKey, fee: u64) -> Result<TxKernel, TxError> {
 	let mut kernel = TxKernel::with_features(KernelFeatures::Plain {

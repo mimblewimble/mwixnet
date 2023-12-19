@@ -5,17 +5,15 @@ use crate::servers::swap::{SwapError, SwapServer, SwapServerImpl};
 use crate::store::SwapStore;
 use crate::wallet::Wallet;
 
+use futures::FutureExt;
 use grin_onion::crypto::comsig::{self, ComSignature};
 use grin_onion::onion::Onion;
-use grin_util::StopState;
 use jsonrpc_core::Value;
 use jsonrpc_derive::rpc;
 use jsonrpc_http_server::jsonrpc_core::*;
-use jsonrpc_http_server::*;
+use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-use std::thread::{sleep, spawn};
-use std::time::Duration;
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize)]
 pub struct SwapReq {
@@ -27,22 +25,23 @@ pub struct SwapReq {
 #[rpc(server)]
 pub trait SwapAPI {
 	#[rpc(name = "swap")]
-	fn swap(&self, swap: SwapReq) -> jsonrpc_core::Result<Value>;
+	fn swap(&self, swap: SwapReq) -> BoxFuture<jsonrpc_core::Result<Value>>;
 }
 
 #[derive(Clone)]
 struct RPCSwapServer {
 	server_config: ServerConfig,
-	server: Arc<Mutex<dyn SwapServer>>,
+	server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
 }
 
 impl RPCSwapServer {
 	/// Spin up an instance of the JSON-RPC HTTP server.
-	fn start_http(&self) -> jsonrpc_http_server::Server {
+	fn start_http(&self, runtime_handle: tokio::runtime::Handle) -> jsonrpc_http_server::Server {
 		let mut io = IoHandler::new();
 		io.extend_with(RPCSwapServer::to_delegate(self.clone()));
 
 		ServerBuilder::new(io)
+			.event_loop_executor(runtime_handle)
 			.cors(DomainsValidation::Disabled)
 			.request_middleware(|request: hyper::Request<hyper::Body>| {
 				if request.uri() == "/v1" {
@@ -70,24 +69,31 @@ impl From<SwapError> for Error {
 }
 
 impl SwapAPI for RPCSwapServer {
-	fn swap(&self, swap: SwapReq) -> jsonrpc_core::Result<Value> {
-		self.server
-			.lock()
-			.unwrap()
-			.swap(&swap.onion, &swap.comsig)?;
-		Ok(Value::String("success".into()))
+	fn swap(&self, swap: SwapReq) -> BoxFuture<jsonrpc_core::Result<Value>> {
+		let server = self.server.clone();
+		async move {
+			server.lock().await.swap(&swap.onion, &swap.comsig).await?;
+			Ok(Value::String("success".into()))
+		}
+		.boxed()
 	}
 }
 
 /// Spin up the JSON-RPC web server
 pub fn listen(
-	server_config: ServerConfig,
+	rt_handle: &tokio::runtime::Handle,
+	server_config: &ServerConfig,
 	next_server: Option<Arc<dyn MixClient>>,
 	wallet: Arc<dyn Wallet>,
 	node: Arc<dyn GrinNode>,
 	store: SwapStore,
-	stop_state: Arc<StopState>,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+) -> std::result::Result<
+	(
+		Arc<tokio::sync::Mutex<dyn SwapServer>>,
+		jsonrpc_http_server::Server,
+	),
+	Box<dyn std::error::Error>,
+> {
 	let server = SwapServerImpl::new(
 		server_config.clone(),
 		next_server,
@@ -95,54 +101,33 @@ pub fn listen(
 		node.clone(),
 		store,
 	);
-	let server = Arc::new(Mutex::new(server));
+	let server = Arc::new(tokio::sync::Mutex::new(server));
 
 	let rpc_server = RPCSwapServer {
 		server_config: server_config.clone(),
 		server: server.clone(),
 	};
 
-	let http_server = rpc_server.start_http();
+	let http_server = rpc_server.start_http(rt_handle.clone());
 
-	let close_handle = http_server.close_handle();
-	let round_handle = spawn(move || {
-		let mut secs = 0;
-		loop {
-			if stop_state.is_stopped() {
-				close_handle.close();
-				break;
-			}
-
-			sleep(Duration::from_secs(1));
-			secs = (secs + 1) % server_config.interval_s;
-
-			if secs == 0 {
-				let _ = server.lock().unwrap().execute_round();
-			}
-		}
-	});
-
-	http_server.wait();
-	round_handle.join().unwrap();
-
-	Ok(())
+	Ok((server, http_server))
 }
 
 #[cfg(test)]
 mod tests {
 	use crate::config::ServerConfig;
-	use crate::crypto::comsig::ComSignature;
-	use crate::crypto::secp;
 	use crate::servers::swap::mock::MockSwapServer;
 	use crate::servers::swap::{SwapError, SwapServer};
 	use crate::servers::swap_rpc::{RPCSwapServer, SwapReq};
 
 	use grin_onion::create_onion;
+	use grin_onion::crypto::comsig::ComSignature;
+	use grin_onion::crypto::secp;
 	use std::net::TcpListener;
-	use std::sync::{Arc, Mutex};
+	use std::sync::Arc;
 
 	use hyper::{Body, Client, Request, Response};
-	use tokio::runtime::Runtime;
+	use tokio::sync::Mutex;
 
 	async fn body_to_string(req: Response<Body>) -> String {
 		let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
@@ -150,10 +135,11 @@ mod tests {
 	}
 
 	/// Spin up a temporary web service, query the API, then cleanup and return response
-	fn make_request(
-		server: Arc<Mutex<dyn SwapServer>>,
+	async fn async_make_request(
+		server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
 		req: String,
-	) -> Result<String, Box<dyn std::error::Error>> {
+		runtime_handle: &tokio::runtime::Handle,
+	) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
 		let server_config = ServerConfig {
 			key: secp::random_secret(),
 			interval_s: 1,
@@ -173,28 +159,21 @@ mod tests {
 		};
 
 		// Start the JSON-RPC server
-		let http_server = rpc_server.start_http();
+		let http_server = rpc_server.start_http(runtime_handle.clone());
 
 		let uri = format!("http://{}/v1", server_config.addr);
 
-		let threaded_rt = Runtime::new()?;
-		let do_request = async move {
-			let request = Request::post(uri)
-				.header("Content-Type", "application/json")
-				.body(Body::from(req))
-				.unwrap();
+		let request = Request::post(uri)
+			.header("Content-Type", "application/json")
+			.body(Body::from(req))
+			.unwrap();
 
-			Client::new().request(request).await
-		};
+		let response = Client::new().request(request).await?;
 
-		let response = threaded_rt.block_on(do_request)?;
-		let response_str: String = threaded_rt.block_on(body_to_string(response));
-
-		// Wait for shutdown
-		threaded_rt.shutdown_background();
+		let response_str: String = body_to_string(response).await;
 
 		// Execute one round
-		server.lock().unwrap().execute_round()?;
+		server.lock().await.execute_round().await?;
 
 		// Stop the server
 		http_server.close();
@@ -206,7 +185,11 @@ mod tests {
 
 	/// Demonstrates a successful swap response
 	#[test]
-	fn swap_success() -> Result<(), Box<dyn std::error::Error>> {
+	fn swap_success() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+		let mut rt = tokio::runtime::Builder::new()
+			.threaded_scheduler()
+			.enable_all()
+			.build()?;
 		let commitment = secp::commit(1234, &secp::random_secret())?;
 		let onion = create_onion(&commitment, &vec![])?;
 		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
@@ -221,7 +204,8 @@ mod tests {
 			"{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}",
 			serde_json::json!(swap)
 		);
-		let response = make_request(server, req)?;
+		let rt_handle = rt.handle().clone();
+		let response = rt.block_on(async_make_request(server, req, &rt_handle))?;
 		let expected = "{\"jsonrpc\":\"2.0\",\"result\":\"success\",\"id\":\"1\"}\n";
 		assert_eq!(response, expected);
 
@@ -229,7 +213,11 @@ mod tests {
 	}
 
 	#[test]
-	fn swap_bad_request() -> Result<(), Box<dyn std::error::Error>> {
+	fn swap_bad_request() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+		let mut rt = tokio::runtime::Builder::new()
+			.threaded_scheduler()
+			.enable_all()
+			.build()?;
 		let server: Arc<Mutex<dyn SwapServer>> = Arc::new(Mutex::new(MockSwapServer::new()));
 
 		let params = "{ \"param\": \"Not a valid Swap request\" }";
@@ -237,7 +225,8 @@ mod tests {
 			"{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}",
 			params
 		);
-		let response = make_request(server, req)?;
+		let rt_handle = rt.handle().clone();
+		let response = rt.block_on(async_make_request(server, req, &rt_handle))?;
 		let expected = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Invalid params: missing field `onion`.\"},\"id\":\"1\"}\n";
 		assert_eq!(response, expected);
 		Ok(())
@@ -245,7 +234,12 @@ mod tests {
 
 	/// Returns "Commitment not found" when there's no matching output in the UTXO set.
 	#[test]
-	fn swap_utxo_missing() -> Result<(), Box<dyn std::error::Error>> {
+	fn swap_utxo_missing() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+		let mut rt = tokio::runtime::Builder::new()
+			.threaded_scheduler()
+			.enable_all()
+			.build()?;
+
 		let commitment = secp::commit(1234, &secp::random_secret())?;
 		let onion = create_onion(&commitment, &vec![])?;
 		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
@@ -267,7 +261,8 @@ mod tests {
 			"{{\"jsonrpc\": \"2.0\", \"method\": \"swap\", \"params\": [{}], \"id\": \"1\"}}",
 			serde_json::json!(swap)
 		);
-		let response = make_request(server, req)?;
+		let rt_handle = rt.handle().clone();
+		let response = rt.block_on(async_make_request(server, req, &rt_handle))?;
 		let expected = format!(
             "{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":-32602,\"message\":\"Output {:?} does not exist, or is already spent.\"}},\"id\":\"1\"}}\n",
             commitment

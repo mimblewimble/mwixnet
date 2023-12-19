@@ -1,5 +1,5 @@
-use crate::crypto::dalek::DalekPublicKey;
-use crate::crypto::secp::SecretKey;
+use grin_onion::crypto::dalek::DalekPublicKey;
+use grin_onion::crypto::secp::SecretKey;
 
 use core::num::NonZeroU32;
 use grin_core::global::ChainTypes;
@@ -39,10 +39,10 @@ pub struct ServerConfig {
 	/// path to file containing secret for the grin wallet's owner api
 	pub wallet_owner_secret_path: Option<String>,
 	/// public key of the previous mix/swap server (e.g. N_1 if this is N_2)
-	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	pub prev_server: Option<DalekPublicKey>,
 	/// public key of the next mix server
-	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	pub next_server: Option<DalekPublicKey>,
 }
 
@@ -186,9 +186,9 @@ struct RawConfig {
 	grin_node_secret_path: Option<String>,
 	wallet_owner_url: SocketAddr,
 	wallet_owner_secret_path: Option<String>,
-	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	prev_server: Option<DalekPublicKey>,
-	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	next_server: Option<DalekPublicKey>,
 }
 
@@ -289,7 +289,8 @@ pub fn wallet_owner_url(_chain_type: &ChainTypes) -> SocketAddr {
 
 #[cfg(test)]
 pub mod test_util {
-	use crate::{DalekPublicKey, ServerConfig};
+	use crate::config::ServerConfig;
+	use grin_onion::crypto::dalek::DalekPublicKey;
 	use secp256k1zkp::SecretKey;
 	use std::net::TcpListener;
 
@@ -317,7 +318,7 @@ pub mod test_util {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::crypto::secp;
+	use grin_onion::crypto::secp;
 
 	#[test]
 	fn server_key_encrypt() {

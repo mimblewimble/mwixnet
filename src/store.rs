@@ -21,8 +21,13 @@ const SWAP_PREFIX: u8 = b'S';
 #[derive(Clone, Debug, PartialEq)]
 pub enum SwapStatus {
 	Unprocessed,
-	InProcess { kernel_hash: Hash },
-	Completed { kernel_hash: Hash, block_hash: Hash },
+	InProcess {
+		kernel_commit: Commitment,
+	},
+	Completed {
+		kernel_commit: Commitment,
+		block_hash: Hash,
+	},
 	Failed,
 }
 
@@ -32,16 +37,16 @@ impl Writeable for SwapStatus {
 			SwapStatus::Unprocessed => {
 				writer.write_u8(0)?;
 			}
-			SwapStatus::InProcess { kernel_hash } => {
+			SwapStatus::InProcess { kernel_commit } => {
 				writer.write_u8(1)?;
-				kernel_hash.write(writer)?;
+				kernel_commit.write(writer)?;
 			}
 			SwapStatus::Completed {
-				kernel_hash,
+				kernel_commit,
 				block_hash,
 			} => {
 				writer.write_u8(2)?;
-				kernel_hash.write(writer)?;
+				kernel_commit.write(writer)?;
 				block_hash.write(writer)?;
 			}
 			SwapStatus::Failed => {
@@ -58,14 +63,14 @@ impl Readable for SwapStatus {
 		let status = match reader.read_u8()? {
 			0 => SwapStatus::Unprocessed,
 			1 => {
-				let kernel_hash = Hash::read(reader)?;
-				SwapStatus::InProcess { kernel_hash }
+				let kernel_commit = Commitment::read(reader)?;
+				SwapStatus::InProcess { kernel_commit }
 			}
 			2 => {
-				let kernel_hash = Hash::read(reader)?;
+				let kernel_commit = Commitment::read(reader)?;
 				let block_hash = Hash::read(reader)?;
 				SwapStatus::Completed {
-					kernel_hash,
+					kernel_commit,
 					block_hash,
 				}
 			}
@@ -244,8 +249,7 @@ impl SwapStore {
 
 #[cfg(test)]
 mod tests {
-	use crate::store::{SwapData, SwapStatus, SwapStore};
-	use crate::StoreError;
+	use crate::store::{StoreError, SwapData, SwapStatus, SwapStore};
 	use grin_core::core::{Input, OutputFeatures};
 	use grin_core::global::{self, ChainTypes};
 	use grin_onion::crypto::secp;
@@ -278,11 +282,11 @@ mod tests {
 			SwapStatus::Unprocessed
 		} else if s == 1 {
 			SwapStatus::InProcess {
-				kernel_hash: onion_test_util::rand_hash(),
+				kernel_commit: onion_test_util::rand_commit(),
 			}
 		} else {
 			SwapStatus::Completed {
-				kernel_hash: onion_test_util::rand_hash(),
+				kernel_commit: onion_test_util::rand_commit(),
 				block_hash: onion_test_util::rand_hash(),
 			}
 		};
@@ -330,7 +334,7 @@ mod tests {
 		assert!(store.swap_exists(&swap.input.commit)?);
 
 		swap.status = SwapStatus::InProcess {
-			kernel_hash: onion_test_util::rand_hash(),
+			kernel_commit: onion_test_util::rand_commit(),
 		};
 		let result = store.save_swap(&swap, false);
 		assert_eq!(
