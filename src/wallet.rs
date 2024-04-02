@@ -133,7 +133,6 @@ impl HttpWallet {
 			url.as_str(),
 			wallet_owner_secret.clone(),
 			&enc_req,
-			client::TimeOut::default(),
 		)
 		.map_err(WalletError::ApiCommError)?;
 		let decrypted = res
@@ -155,12 +154,8 @@ impl HttpWallet {
 		let url = format!("http://{}{}", wallet_owner_url, ENDPOINT);
 		let req = build_request(method, params);
 		let res =
-			client::post::<Request, Response>(
-				url.as_str(),
-				wallet_owner_secret.clone(),
-				&req,
-				client::TimeOut::default()
-			).map_err(WalletError::ApiCommError)?;
+			client::post::<Request, Response>(url.as_str(), wallet_owner_secret.clone(), &req)
+				.map_err(WalletError::ApiCommError)?;
 		let parsed = res
 			.clone()
 			.into_result()
