@@ -47,6 +47,7 @@ In case of errors, the API will return a `SwapError` type with one of the follow
 - `FeeTooLow`: The provided fee is too low.
 - `StoreError`: An error occurred when saving swap to the data store.
 - `ClientError`: An error occurred during client communication.
+- `SwapTxNotFound`: The previous swap transaction was not found in data store.
 - `UnknownError`: An unknown error occurred.
 
 ### Example

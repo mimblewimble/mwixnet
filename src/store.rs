@@ -236,7 +236,7 @@ impl SwapStore {
 
     /// Reads a single value by key
     fn read<K: AsRef<[u8]> + Copy, V: Readable>(&self, prefix: u8, k: K) -> Result<V, StoreError> {
-        store::option_to_not_found(self.db.get_ser(&store::to_key(prefix, k)[..], None), || {
+        store::option_to_not_found(self.db.get_ser(&store::to_key(prefix, k), None), || {
             format!("{}:{}", prefix, k.to_hex())
         })
             .map_err(StoreError::ReadError)
@@ -279,7 +279,6 @@ impl SwapStore {
     }
 
     /// Reads a swap from the database
-    #[allow(dead_code)]
     pub fn get_swap(&self, input_commit: &Commitment) -> Result<SwapData, StoreError> {
         self.read(SWAP_PREFIX, input_commit)
     }

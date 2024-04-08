@@ -45,6 +45,8 @@ pub enum SwapError {
     NodeError(String),
     #[error("Client communication error: {0:?}")]
     ClientError(String),
+    #[error("Swap transaction not found: {0:?}")]
+    SwapTxNotFound(Commitment),
     #[error("{0}")]
     UnknownError(String),
 }
@@ -327,7 +329,8 @@ impl SwapServer for SwapServerImpl {
 
     async fn check_reorg(&self, tx: Arc<Transaction>) -> Result<Option<Arc<Transaction>>, SwapError> {
         let excess = tx.kernels().first().unwrap().excess;
-        if let Ok(swap_tx) = self.store.lock().await.get_swap_tx(&excess) {
+        let locked_store = self.store.lock().await;
+        if let Ok(swap_tx) = locked_store.get_swap_tx(&excess) {
             // If kernel is in active chain, return tx
             if self.node.async_get_kernel(&excess, Some(swap_tx.chain_tip.0), None).await?.is_some() {
                 return Ok(Some(tx));
@@ -341,7 +344,6 @@ impl SwapServer for SwapServerImpl {
 
             // Collect all swaps based on tx's inputs, and execute_round with those swaps
             let next_block_height = self.node.async_get_chain_tip().await?.0 + 1;
-            let locked_store = self.store.lock().await;
             let mut swaps = Vec::new();
             for input_commit in &tx.inputs_committed() {
                 if let Ok(swap) = locked_store.get_swap(&input_commit) {
@@ -353,7 +355,7 @@ impl SwapServer for SwapServerImpl {
 
             self.async_execute_round(&locked_store, swaps).await
         } else {
-            Err(SwapError::UnknownError("Swap transaction not found".to_string())) // TODO: Create SwapError enum value
+            Err(SwapError::SwapTxNotFound(excess))
         }
     }
 }
@@ -453,7 +455,7 @@ mod tests {
     use crate::tx::TxComponents;
 
     use ::function_name::named;
-    use grin_core::core::{Committed, Input, Output, OutputFeatures, Transaction, Weighting};
+    use grin_core::core::{Committed, Input, Inputs, Output, OutputFeatures, Transaction, Weighting};
     use grin_onion::crypto::comsig::ComSignature;
     use grin_onion::crypto::secp;
     use grin_onion::onion::Onion;
@@ -827,6 +829,26 @@ mod tests {
             Err(SwapError::AlreadySwapped {
                 commit: input_commit.clone()
             }),
+            result
+        );
+
+        Ok(())
+    }
+
+    /// Returns SwapTxNotFound when trying to check_reorg with a transaction not found in the store.
+    #[tokio::test]
+    #[named]
+    async fn swap_tx_not_found() -> Result<(), Box<dyn std::error::Error>> {
+        let test_dir = init_test!();
+
+        let server_key = secp::random_secret();
+        let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new());
+        let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
+        let kern = tx::build_kernel(&secp::random_secret(), 1000u64)?;
+        let tx: Arc<Transaction> = Arc::new(Transaction::new(Inputs::default(), &[], &[kern.clone()]));
+        let result = server.check_reorg(tx).await;
+        assert_eq!(
+            Err(SwapError::SwapTxNotFound(kern.excess())),
             result
         );
 

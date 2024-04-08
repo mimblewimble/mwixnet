@@ -14,12 +14,12 @@ use grin_util::{StopState, ZeroingString};
 use mwixnet::client::{MixClient, MixClientImpl};
 use mwixnet::node::GrinNode;
 use mwixnet::store::StoreError;
+use rand::{thread_rng, Rng};
 use rpassword;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::{sleep, spawn};
 use std::time::Duration;
-use grin_core::core::Transaction;
 
 #[macro_use]
 extern crate clap;
@@ -262,7 +262,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 
         let close_handle = http_server.close_handle();
         let round_handle = spawn(move || {
-            let mut secs = 0;
+            let mut rng = thread_rng();
+            let mut secs = 0u32;
+            let mut reorg_secs = 0u32;
+            let mut reorg_window = rng.gen_range(900u32, 3600u32);
             let prev_tx = Arc::new(Mutex::new(None));
             let server = swap_server.clone();
 
@@ -274,6 +277,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 
                 sleep(Duration::from_secs(1));
                 secs = (secs + 1) % server_config.interval_s;
+                reorg_secs = (reorg_secs + 1) % reorg_window;
 
                 if secs == 0 {
                     let prev_tx_clone = prev_tx.clone();
@@ -286,7 +290,9 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => None,
                         };
                     });
-                } else if secs % 30 == 0 {
+                    reorg_secs = 0;
+                    reorg_window = rng.gen_range(900u32, 3600u32);
+                } else if reorg_secs == 0 {
                     let prev_tx_clone = prev_tx.clone();
                     let server_clone = server.clone();
                     rt.spawn(async move {
@@ -304,6 +310,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                         }
                     });
+                    reorg_window = rng.gen_range(900u32, 3600u32);
                 }
             }
         });
