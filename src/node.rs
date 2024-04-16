@@ -1,18 +1,19 @@
-use grin_onion::crypto::secp::Commitment;
-
-use grin_api::json_rpc::{build_request, Request, Response};
-use grin_api::{client, LocatedTxKernel};
-use grin_api::{OutputPrintable, OutputType, Tip};
-use grin_core::consensus::COINBASE_MATURITY;
-use grin_core::core::{Committed, Input, OutputFeatures, Transaction};
-use grin_util::ToHex;
-
-use async_trait::async_trait;
-use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+use async_trait::async_trait;
+use grin_api::LocatedTxKernel;
+use grin_api::{OutputPrintable, OutputType, Tip};
+use grin_core::consensus::COINBASE_MATURITY;
 use grin_core::core::hash::Hash;
+use grin_core::core::{Committed, Input, OutputFeatures, Transaction};
+use grin_util::ToHex;
+use serde_json::json;
 use thiserror::Error;
+
+use grin_onion::crypto::secp::Commitment;
+
+use crate::http;
 
 #[async_trait]
 pub trait GrinNode: Send + Sync {
@@ -22,8 +23,8 @@ pub trait GrinNode: Send + Sync {
 		output_commit: &Commitment,
 	) -> Result<Option<OutputPrintable>, NodeError>;
 
-    /// Gets the height and hash of the chain tip
-    async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError>;
+	/// Gets the height and hash of the chain tip
+	async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError>;
 
 	/// Posts a transaction to the grin node
 	async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError>;
@@ -47,6 +48,8 @@ pub enum NodeError {
 	DecodeResponseError(serde_json::Error),
 	#[error("JSON-RPC API communication error: {0:?}")]
 	ApiCommError(grin_api::Error),
+	#[error("Client error: {0:?}")]
+	NodeCommError(http::HttpError),
 	#[error("Error decoding JSON-RPC response: {0:?}")]
 	ResponseParseError(grin_api::json_rpc::Error),
 }
@@ -109,21 +112,24 @@ pub async fn async_build_input(
 	Ok(None)
 }
 
-pub async fn async_is_tx_valid(node: &Arc<dyn GrinNode>, tx: &Transaction) -> Result<bool, NodeError> {
-    let next_block_height = node.async_get_chain_tip().await?.0 + 1;
-    for input_commit in &tx.inputs_committed() {
-        if !async_is_spendable(&node, &input_commit, next_block_height).await? {
-            return Ok(false);
-        }
-    }
+pub async fn async_is_tx_valid(
+	node: &Arc<dyn GrinNode>,
+	tx: &Transaction,
+) -> Result<bool, NodeError> {
+	let next_block_height = node.async_get_chain_tip().await?.0 + 1;
+	for input_commit in &tx.inputs_committed() {
+		if !async_is_spendable(&node, &input_commit, next_block_height).await? {
+			return Ok(false);
+		}
+	}
 
-    for output_commit in &tx.outputs_committed() {
-        if async_is_unspent(&node, &output_commit).await? {
-            return Ok(false);
-        }
-    }
+	for output_commit in &tx.outputs_committed() {
+		if async_is_unspent(&node, &output_commit).await? {
+			return Ok(false);
+		}
+	}
 
-    Ok(true)
+	Ok(true)
 }
 
 /// HTTP (JSON-RPC) implementation of the 'GrinNode' trait
@@ -149,18 +155,9 @@ impl HttpGrinNode {
 		params: &serde_json::Value,
 	) -> Result<D, NodeError> {
 		let url = format!("http://{}{}", self.node_url, ENDPOINT);
-		let req = build_request(method, params);
-		let res = client::post_async::<Request, Response>(
-			url.as_str(),
-			&req,
-			self.node_api_secret.clone(),
-		)
-		.await
-		.map_err(NodeError::ApiCommError)?;
-		let parsed = res
-			.clone()
-			.into_result()
-			.map_err(NodeError::ResponseParseError)?;
+		let parsed = http::async_send_json_request(&url, &self.node_api_secret, &method, &params)
+			.await
+			.map_err(NodeError::NodeCommError)?;
 		Ok(parsed)
 	}
 }
@@ -194,7 +191,7 @@ impl GrinNode for HttpGrinNode {
 		Ok(Some(outputs[0].clone()))
 	}
 
-    async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError> {
+	async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError> {
 		let params = json!([]);
 		let tip_json = self
 			.async_send_request::<serde_json::Value>("get_tip", &params)
@@ -202,7 +199,10 @@ impl GrinNode for HttpGrinNode {
 		let tip =
 			serde_json::from_value::<Tip>(tip_json).map_err(NodeError::DecodeResponseError)?;
 
-        Ok((tip.height, Hash::from_hex(tip.last_block_pushed.as_str()).unwrap()))
+		Ok((
+			tip.height,
+			Hash::from_hex(tip.last_block_pushed.as_str()).unwrap(),
+		))
 	}
 
 	async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError> {
@@ -236,15 +236,17 @@ impl GrinNode for HttpGrinNode {
 
 #[cfg(test)]
 pub mod mock {
-	use super::{GrinNode, NodeError};
+	use std::collections::HashMap;
+	use std::sync::RwLock;
 
 	use async_trait::async_trait;
 	use grin_api::{LocatedTxKernel, OutputPrintable, OutputType};
+	use grin_core::core::hash::Hash;
 	use grin_core::core::Transaction;
+
 	use grin_onion::crypto::secp::Commitment;
-	use std::collections::HashMap;
-	use std::sync::RwLock;
-    use grin_core::core::hash::Hash;
+
+	use super::{GrinNode, NodeError};
 
 	/// Implementation of 'GrinNode' trait that mocks a grin node instance.
 	/// Use only for testing purposes.
@@ -318,8 +320,8 @@ pub mod mock {
 			Ok(None)
 		}
 
-        async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError> {
-            Ok((100, Hash::default()))
+		async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError> {
+			Ok((100, Hash::default()))
 		}
 
 		async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError> {

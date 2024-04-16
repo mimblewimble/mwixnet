@@ -9,45 +9,54 @@ edition = "2021"
 members = ["onion"]
 
 [dependencies]
-async-std = {  version = "1", features = ["tokio02"] }
+arti-client = { version = "0.17.0", default-features = false, features = ["async-std", "rustls", "onion-service-client", "onion-service-service"] }
+arti-hyper = "0.17.0"
+async-std = { version = "1", features = ["tokio1"] }
 async-trait = "0.1.74"
-blake2 = { package = "blake2-rfc", version = "0.2"}
+blake2 = { package = "blake2-rfc", version = "0.2" }
 byteorder = "1"
 bytes = "1.5.0"
 chacha20 = "0.9.1"
 chrono = "0.4.31"
 clap = { version = "2.33", features = ["yaml"] }
 ctrlc = { version = "3.1", features = ["termination"] }
-curve25519-dalek = "2.1"
+curve25519-dalek = "4.1.2"
 dirs = "2.0"
-ed25519-dalek = "1.0.1"
+ed25519-dalek = "2.1.1"
 function_name = "0.3.0"
 futures = "0.3"
-hmac = { version = "0.12.0", features = ["std"]}
-hyper =  "0.13"
-hyper-proxy = "0.9.1"
-hyper-socks2 = "0.5.0"
-hyper-timeout = { version = "0.3", features = [] }
+fs-mistrust = "0.7.9"
+hmac = { version = "0.12.0", features = ["std"] }
+hyper = "0.14.28"
+hyper-tls = "0.6.0"
 itertools = { version = "0.12.0" }
-jsonrpc-core = "17.1"
-jsonrpc-derive = "17.1"
-jsonrpc-http-server = "17.1"
+jsonrpc-core = "18.0.0"
+jsonrpc-derive = "18.0.0"
+jsonrpc-http-server = "18.0.0"
 lazy_static = "1"
 pbkdf2 = "0.8.0"
 rand = "0.7.3"
 remove_dir_all = "0.8.2"
 ring = "0.16"
 rpassword = "4.0"
-serde = { version = "1", features= ["derive"]}
+serde = { version = "1", features = ["derive"] }
 serde_derive = "1"
 serde_json = "1"
 sha2 = "0.10.0"
 thiserror = "1.0.30"
-tokio = { version = "0.2", features = ["full"] }
+tls-api = "0.9.0"
+tls-api-native-tls = "0.9.0"
+tokio = { version = "1.37.0", features = ["full"] }
 toml = "0.8.8"
+tor-hscrypto = "0.17.0"
+tor-hsrproxy = "0.17.0"
+tor-hsservice = "0.17.0"
+tor-llcrypto = "0.17.0"
+tor-keymgr = "0.17.0"
+tor-rtcompat = "0.17.0"
 x25519-dalek = "0.6.0"
 grin_onion = { path = "./onion" }
-grin_secp256k1zkp = { version = "0.7.12", features = ["bullet-proof-sizing"]}
+grin_secp256k1zkp = { version = "0.7.12", features = ["bullet-proof-sizing"] }
 grin_api = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
 grin_core = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
 grin_chain = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }

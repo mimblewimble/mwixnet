@@ -1,17 +1,19 @@
+use std::net::SocketAddr;
+
 use async_trait::async_trait;
-use grin_api::client;
-use grin_api::json_rpc::{build_request, Request, Response, RpcError};
 use grin_core::core::Output;
 use grin_core::libtx::secp_ser;
 use grin_keychain::BlindingFactor;
-use grin_onion::crypto::secp;
 use grin_util::{ToHex, ZeroingString};
-use grin_wallet_api::{EncryptedRequest, EncryptedResponse, JsonId, Token};
-use secp256k1zkp::{PublicKey, Secp256k1, SecretKey};
+use grin_wallet_api::Token;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::net::SocketAddr;
 use thiserror::Error;
+
+use grin_onion::crypto::secp;
+use secp256k1zkp::{PublicKey, Secp256k1, SecretKey};
+
+use crate::http;
 
 #[async_trait]
 pub trait Wallet: Send + Sync {
@@ -25,18 +27,8 @@ pub trait Wallet: Send + Sync {
 /// Error types for interacting with wallets
 #[derive(Error, Debug)]
 pub enum WalletError {
-	#[error("Error encrypting request: {0:?}")]
-	EncryptRequestError(grin_wallet_libwallet::Error),
-	#[error("Error decrypting response: {0:?}")]
-	DecryptResponseError(grin_wallet_libwallet::Error),
-	#[error("Error decoding JSON response: {0:?}")]
-	DecodeResponseError(serde_json::Error),
-	#[error("JSON-RPC API communication error: {0:?}")]
-	ApiCommError(grin_api::Error),
-	#[error("Error decoding JSON-RPC response: {0:?}")]
-	ResponseParseError(grin_api::json_rpc::Error),
-	#[error("Unsucessful response returned: {0:?}")]
-	ResponseRpcError(Option<RpcError>),
+	#[error("Error communication with wallet: {0:?}")]
+	WalletCommError(http::HttpError),
 }
 
 /// HTTP (JSONRPC) implementation of the 'Wallet' trait.
@@ -73,14 +65,16 @@ impl HttpWallet {
 			"name": null,
 			"password": wallet_pass.to_string()
 		});
-		let token: Token = HttpWallet::async_send_enc_request(
-			&wallet_owner_url,
+		let url = format!("http://{}{}", wallet_owner_url, ENDPOINT);
+		let token: Token = http::async_send_enc_request(
+			&url,
 			&wallet_owner_secret,
 			"open_wallet",
 			&open_wallet_params,
 			&shared_key,
 		)
-		.await?;
+		.await
+		.map_err(WalletError::WalletCommError)?;
 		info!("Connected to wallet");
 
 		Ok(HttpWallet {
@@ -98,17 +92,20 @@ impl HttpWallet {
 		let secp = Secp256k1::new();
 		let ephemeral_sk = secp::random_secret();
 		let ephemeral_pk = PublicKey::from_secret_key(&secp, &ephemeral_sk).unwrap();
+		let ephemeral_pk_bytes = ephemeral_pk.serialize_vec(&secp, true);
 		let init_params = json!({
-			"ecdh_pubkey": ephemeral_pk.serialize_vec(&secp, true).to_hex()
+			"ecdh_pubkey": ephemeral_pk_bytes.to_hex()
 		});
 
-		let response_pk: ECDHPubkey = HttpWallet::async_send_json_request(
-			&wallet_owner_url,
+		let url = format!("http://{}{}", wallet_owner_url, ENDPOINT);
+		let response_pk: ECDHPubkey = http::async_send_json_request(
+			&url,
 			&wallet_owner_secret,
 			"init_secure_api",
 			&init_params,
 		)
-		.await?;
+		.await
+		.map_err(WalletError::WalletCommError)?;
 
 		let shared_key = {
 			let mut shared_pubkey = response_pk.ecdh_pubkey.clone();
@@ -126,75 +123,16 @@ impl HttpWallet {
 		method: &str,
 		params: &serde_json::Value,
 	) -> Result<D, WalletError> {
-		HttpWallet::async_send_enc_request(
-			&self.wallet_owner_url,
+		let url = format!("http://{}{}", self.wallet_owner_url, ENDPOINT);
+		http::async_send_enc_request(
+			&url,
 			&self.wallet_owner_secret,
 			method,
 			params,
 			&self.shared_key,
 		)
 		.await
-	}
-
-	async fn async_send_enc_request<D: serde::de::DeserializeOwned>(
-		wallet_owner_url: &SocketAddr,
-		wallet_owner_secret: &Option<String>,
-		method: &str,
-		params: &serde_json::Value,
-		shared_key: &SecretKey,
-	) -> Result<D, WalletError> {
-		let url = format!("http://{}{}", wallet_owner_url, ENDPOINT);
-		let req = json!({
-			"method": method,
-			"params": params,
-			"id": JsonId::IntId(1),
-			"jsonrpc": "2.0",
-		});
-		let enc_req = EncryptedRequest::from_json(&JsonId::IntId(1), &req, &shared_key)
-			.map_err(WalletError::EncryptRequestError)?;
-		let res = client::post_async::<EncryptedRequest, EncryptedResponse>(
-			url.as_str(),
-			&enc_req,
-			wallet_owner_secret.clone(),
-		)
-		.await
-		.map_err(WalletError::ApiCommError)?;
-		let decrypted = res
-			.decrypt(&shared_key)
-			.map_err(WalletError::DecryptResponseError)?;
-		let response: Response =
-			serde_json::from_value(decrypted).map_err(WalletError::DecodeResponseError)?;
-		let result = response
-			.result
-			.ok_or(WalletError::ResponseRpcError(response.error.clone()))?;
-		let ok = result
-			.get("Ok")
-			.ok_or(WalletError::ResponseRpcError(response.error.clone()))?;
-		let parsed =
-			serde_json::from_value(ok.clone()).map_err(WalletError::DecodeResponseError)?;
-		Ok(parsed)
-	}
-
-	async fn async_send_json_request<D: serde::de::DeserializeOwned>(
-		wallet_owner_url: &SocketAddr,
-		wallet_owner_secret: &Option<String>,
-		method: &str,
-		params: &serde_json::Value,
-	) -> Result<D, WalletError> {
-		let url = format!("http://{}{}", wallet_owner_url, ENDPOINT);
-		let req = build_request(method, params);
-		let res = client::post_async::<Request, Response>(
-			url.as_str(),
-			&req,
-			wallet_owner_secret.clone(),
-		)
-		.await
-		.map_err(WalletError::ApiCommError)?;
-		let parsed = res
-			.clone()
-			.into_result()
-			.map_err(WalletError::ResponseParseError)?;
-		Ok(parsed)
+		.map_err(WalletError::WalletCommError)
 	}
 
 	pub fn get_token(&self) -> Token {
@@ -219,35 +157,40 @@ impl Wallet for HttpWallet {
 		&self,
 		amount: u64,
 	) -> Result<(BlindingFactor, Output), WalletError> {
-		let req_json = json!({
+		let params = json!({
 			"token": self.token,
 			"features": "Plain",
 			"amount":  amount
 		});
-		let output: OutputWithBlind = HttpWallet::async_send_enc_request(
-			&self.wallet_owner_url,
+
+		let url = format!("http://{}{}", self.wallet_owner_url, ENDPOINT);
+		let output: OutputWithBlind = http::async_send_enc_request(
+			&url,
 			&self.wallet_owner_secret,
 			"build_output",
-			&req_json,
+			&params,
 			&self.shared_key,
 		)
-		.await?;
+		.await
+		.map_err(WalletError::WalletCommError)?;
 		Ok((output.blind, output.output))
 	}
 }
 
 #[cfg(test)]
 pub mod mock {
-	use super::{Wallet, WalletError};
 	use std::borrow::BorrowMut;
+	use std::sync::{Arc, Mutex};
 
 	use async_trait::async_trait;
 	use grin_core::core::{Output, OutputFeatures};
 	use grin_keychain::BlindingFactor;
+
 	use grin_onion::crypto::secp;
 	use secp256k1zkp::pedersen::Commitment;
 	use secp256k1zkp::Secp256k1;
-	use std::sync::{Arc, Mutex};
+
+	use super::{Wallet, WalletError};
 
 	/// Mock implementation of the 'Wallet' trait for unit-tests.
 	#[derive(Clone)]

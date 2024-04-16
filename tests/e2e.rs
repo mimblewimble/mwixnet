@@ -1,17 +1,19 @@
-use crate::common::miner::Miner;
-use crate::common::node::GrinNodeManager;
-use crate::common::server::Servers;
-use crate::common::wallet::GrinWalletManager;
+#[macro_use]
+extern crate log;
+
+use std::ops::Deref;
+
 use function_name::named;
 use grin_core::global;
 use grin_util::logger::LoggingConfig;
 use log::Level;
-use std::ops::Deref;
+
+use crate::common::miner::Miner;
+use crate::common::node::GrinNodeManager;
+use crate::common::server::Servers;
+use crate::common::wallet::GrinWalletManager;
 
 mod common;
-
-#[macro_use]
-extern crate log;
 
 /// Just removes all results from previous runs
 fn clean_all_output(test_dir: &str) {
@@ -42,8 +44,7 @@ fn setup_test(test_name: &str) -> (GrinNodeManager, GrinWalletManager, String) {
 #[named]
 fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 	let (mut nodes, mut wallets, test_dir) = setup_test(function_name!());
-	let mut rt = tokio::runtime::Builder::new()
-		.threaded_scheduler()
+	let rt = tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
 		.build()?;
 

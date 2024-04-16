@@ -1,24 +1,26 @@
-use crate::client::MixClient;
-use crate::config::ServerConfig;
-use crate::node::{self, GrinNode};
-use crate::tx::{self, TxComponents};
-use crate::wallet::Wallet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use crate::servers::mix_rpc::MixResp;
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use grin_core::core::{Output, OutputFeatures, TransactionBody};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
 use grin_core::ser;
 use grin_core::ser::ProtocolVersion;
+use itertools::Itertools;
+use thiserror::Error;
+
 use grin_onion::crypto::dalek::{self, DalekSignature};
 use grin_onion::onion::{Onion, OnionError, PeeledOnion};
-use itertools::Itertools;
 use secp256k1zkp::key::ZERO_KEY;
 use secp256k1zkp::Secp256k1;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use thiserror::Error;
+
+use crate::config::ServerConfig;
+use crate::mix_client::MixClient;
+use crate::node::{self, GrinNode};
+use crate::servers::mix_rpc::MixResp;
+use crate::tx::{self, TxComponents};
+use crate::wallet::Wallet;
 
 /// Mixer error types
 #[derive(Error, Debug)]
@@ -46,7 +48,7 @@ pub enum MixError {
 	#[error("Wallet error: {0:?}")]
 	WalletError(crate::wallet::WalletError),
 	#[error("Client comm error: {0:?}")]
-	Client(crate::client::ClientError),
+	Client(crate::mix_client::MixClientError),
 }
 
 /// An internal MWixnet server - a "Mixer"
@@ -298,16 +300,17 @@ impl MixServer for MixServerImpl {
 
 #[cfg(test)]
 mod test_util {
-	use crate::client::test_util::DirectMixClient;
-	use crate::client::MixClient;
-	use crate::config;
-	use crate::node::mock::MockGrinNode;
-	use crate::servers::mix::MixServerImpl;
-	use crate::wallet::mock::MockWallet;
+	use std::sync::Arc;
 
 	use grin_onion::crypto::dalek::DalekPublicKey;
 	use secp256k1zkp::SecretKey;
-	use std::sync::Arc;
+
+	use crate::config;
+	use crate::mix_client::MixClient;
+	use crate::mix_client::test_util::DirectMixClient;
+	use crate::node::mock::MockGrinNode;
+	use crate::servers::mix::MixServerImpl;
+	use crate::wallet::mock::MockWallet;
 
 	pub fn new_mixer(
 		server_key: &SecretKey,
@@ -340,18 +343,20 @@ mod test_util {
 
 #[cfg(test)]
 mod tests {
-	use crate::client::MixClient;
-	use crate::node::mock::MockGrinNode;
+	use std::collections::HashSet;
+	use std::sync::Arc;
 
 	use ::function_name::named;
+
+	use grin_onion::{create_onion, Hop, new_hop};
 	use grin_onion::crypto::dalek::DalekPublicKey;
 	use grin_onion::crypto::secp::{self, Commitment};
 	use grin_onion::test_util as onion_test_util;
-	use grin_onion::{create_onion, new_hop, Hop};
 	use secp256k1zkp::pedersen::RangeProof;
 	use secp256k1zkp::SecretKey;
-	use std::collections::HashSet;
-	use std::sync::Arc;
+
+	use crate::mix_client::MixClient;
+	use crate::node::mock::MockGrinNode;
 
 	macro_rules! init_test {
 		() => {{

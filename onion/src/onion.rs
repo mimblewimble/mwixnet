@@ -1,21 +1,22 @@
-use crate::crypto::secp::{self, Commitment, RangeProof, SecretKey};
-use crate::util::{read_optional, vec_to_array, write_optional};
-
-use chacha20::cipher::{NewCipher, StreamCipher};
-use chacha20::{ChaCha20, Key, Nonce};
-use grin_core::core::FeeFields;
-use grin_core::ser::{self, Readable, Reader, Writeable, Writer};
-use grin_util::{self, ToHex};
-use hmac::digest::InvalidLength;
-use hmac::{Hmac, Mac};
-use serde::ser::SerializeStruct;
-use serde::Deserialize;
-use sha2::Sha256;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::result::Result;
+
+use chacha20::{ChaCha20, Key, Nonce};
+use chacha20::cipher::{NewCipher, StreamCipher};
+use grin_core::core::FeeFields;
+use grin_core::ser::{self, Readable, Reader, Writeable, Writer};
+use grin_util::{self, ToHex};
+use hmac::{Hmac, Mac};
+use hmac::digest::InvalidLength;
+use serde::Deserialize;
+use serde::ser::SerializeStruct;
+use sha2::Sha256;
 use thiserror::Error;
 use x25519_dalek::{PublicKey as xPublicKey, SharedSecret, StaticSecret};
+
+use crate::crypto::secp::{self, Commitment, RangeProof, SecretKey};
+use crate::util::{read_optional, vec_to_array, write_optional};
 
 type HmacSha256 = Hmac<Sha256>;
 pub type RawBytes = Vec<u8>;
@@ -328,11 +329,12 @@ impl From<ser::Error> for OnionError {
 
 #[cfg(test)]
 pub mod tests {
-	use super::*;
-	use crate::crypto::secp::random_secret;
-	use crate::{create_onion, new_hop, Hop};
-
 	use grin_core::core::FeeFields;
+
+	use crate::{create_onion, Hop, new_hop};
+	use crate::crypto::secp::random_secret;
+
+	use super::*;
 
 	/// Test end-to-end Onion creation and unwrapping logic.
 	#[test]
@@ -381,7 +383,7 @@ pub mod tests {
 		let mut payload = Payload {
 			next_ephemeral_pk: onion_packet.ephemeral_pubkey.clone(),
 			excess: random_secret(),
-			fee: FeeFields::from(fee_per_hop as u32),
+			fee: FeeFields::from(fee_per_hop),
 			rangeproof: None,
 		};
 		for i in 0..5 {
@@ -393,6 +395,6 @@ pub mod tests {
 		assert!(payload.rangeproof.is_some());
 		assert_eq!(payload.rangeproof.unwrap(), hops[4].rangeproof.unwrap());
 		assert_eq!(secp::commit(out_value, &final_blind).unwrap(), final_commit);
-		assert_eq!(payload.fee, FeeFields::from(fee_per_hop as u32));
+		assert_eq!(payload.fee, FeeFields::from(fee_per_hop));
 	}
 }

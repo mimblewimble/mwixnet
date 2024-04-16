@@ -1,19 +1,20 @@
-use crate::client::MixClient;
-use crate::config::ServerConfig;
-use crate::node::GrinNode;
-use crate::servers::mix::{MixError, MixServer, MixServerImpl};
-use crate::wallet::Wallet;
+use std::sync::Arc;
 
-use crate::tx::TxComponents;
 use futures::FutureExt;
+use jsonrpc_derive::rpc;
+use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
+use jsonrpc_http_server::jsonrpc_core::{self, BoxFuture, IoHandler};
+use serde::{Deserialize, Serialize};
+
 use grin_onion::crypto::dalek::{self, DalekSignature};
 use grin_onion::onion::Onion;
-use jsonrpc_core::BoxFuture;
-use jsonrpc_derive::rpc;
-use jsonrpc_http_server::jsonrpc_core::{self as jsonrpc, IoHandler};
-use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+
+use crate::config::ServerConfig;
+use crate::mix_client::MixClient;
+use crate::node::GrinNode;
+use crate::servers::mix::{MixError, MixServer, MixServerImpl};
+use crate::tx::TxComponents;
+use crate::wallet::Wallet;
 
 #[derive(Serialize, Deserialize)]
 pub struct MixReq {
@@ -37,7 +38,7 @@ impl MixReq {
 #[rpc(server)]
 pub trait MixAPI {
 	#[rpc(name = "mix")]
-	fn mix(&self, mix: MixReq) -> BoxFuture<jsonrpc::Result<MixResp>>;
+	fn mix(&self, mix: MixReq) -> BoxFuture<jsonrpc_core::Result<MixResp>>;
 }
 
 #[derive(Clone)]
@@ -67,14 +68,14 @@ impl RPCMixServer {
 	}
 }
 
-impl From<MixError> for jsonrpc::Error {
+impl From<MixError> for jsonrpc_core::Error {
 	fn from(e: MixError) -> Self {
-		jsonrpc::Error::invalid_params(e.to_string())
+		jsonrpc_core::Error::invalid_params(e.to_string())
 	}
 }
 
 impl MixAPI for RPCMixServer {
-	fn mix(&self, mix: MixReq) -> BoxFuture<jsonrpc::Result<MixResp>> {
+	fn mix(&self, mix: MixReq) -> BoxFuture<jsonrpc_core::Result<MixResp>> {
 		let server = self.server.clone();
 		async move {
 			let response = server

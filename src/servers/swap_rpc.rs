@@ -1,19 +1,20 @@
-use crate::client::MixClient;
+use std::sync::Arc;
+
+use futures::FutureExt;
+use jsonrpc_core::{BoxFuture, Value};
+use jsonrpc_derive::rpc;
+use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
+use serde::{Deserialize, Serialize};
+
+use grin_onion::crypto::comsig::{self, ComSignature};
+use grin_onion::onion::Onion;
+
 use crate::config::ServerConfig;
+use crate::mix_client::MixClient;
 use crate::node::GrinNode;
 use crate::servers::swap::{SwapError, SwapServer, SwapServerImpl};
 use crate::store::SwapStore;
 use crate::wallet::Wallet;
-
-use futures::FutureExt;
-use grin_onion::crypto::comsig::{self, ComSignature};
-use grin_onion::onion::Onion;
-use jsonrpc_core::Value;
-use jsonrpc_derive::rpc;
-use jsonrpc_http_server::jsonrpc_core::*;
-use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Serialize, Deserialize)]
 pub struct SwapReq {
@@ -37,7 +38,7 @@ struct RPCSwapServer {
 impl RPCSwapServer {
 	/// Spin up an instance of the JSON-RPC HTTP server.
 	fn start_http(&self, runtime_handle: tokio::runtime::Handle) -> jsonrpc_http_server::Server {
-		let mut io = IoHandler::new();
+		let mut io = jsonrpc_core::IoHandler::new();
 		io.extend_with(RPCSwapServer::to_delegate(self.clone()));
 
 		ServerBuilder::new(io)
@@ -55,15 +56,15 @@ impl RPCSwapServer {
 	}
 }
 
-impl From<SwapError> for Error {
+impl From<SwapError> for jsonrpc_core::Error {
 	fn from(e: SwapError) -> Self {
 		match e {
-			SwapError::UnknownError(_) => Error {
+			SwapError::UnknownError(_) => jsonrpc_core::Error {
 				message: e.to_string(),
-				code: ErrorCode::InternalError,
+				code: jsonrpc_core::ErrorCode::InternalError,
 				data: None,
 			},
-			_ => Error::invalid_params(e.to_string()),
+			_ => jsonrpc_core::Error::invalid_params(e.to_string()),
 		}
 	}
 }
@@ -115,19 +116,20 @@ pub fn listen(
 
 #[cfg(test)]
 mod tests {
-	use crate::config::ServerConfig;
-	use crate::servers::swap::mock::MockSwapServer;
-	use crate::servers::swap::{SwapError, SwapServer};
-	use crate::servers::swap_rpc::{RPCSwapServer, SwapReq};
-
-	use grin_onion::create_onion;
-	use grin_onion::crypto::comsig::ComSignature;
-	use grin_onion::crypto::secp;
 	use std::net::TcpListener;
 	use std::sync::Arc;
 
 	use hyper::{Body, Client, Request, Response};
 	use tokio::sync::Mutex;
+
+	use grin_onion::create_onion;
+	use grin_onion::crypto::comsig::ComSignature;
+	use grin_onion::crypto::secp;
+
+	use crate::config::ServerConfig;
+	use crate::servers::swap::{SwapError, SwapServer};
+	use crate::servers::swap::mock::MockSwapServer;
+	use crate::servers::swap_rpc::{RPCSwapServer, SwapReq};
 
 	async fn body_to_string(req: Response<Body>) -> String {
 		let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
@@ -144,7 +146,6 @@ mod tests {
 			key: secp::random_secret(),
 			interval_s: 1,
 			addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
-			socks_proxy_addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
 			grin_node_url: "127.0.0.1:3413".parse()?,
 			grin_node_secret_path: None,
 			wallet_owner_url: "127.0.0.1:3420".parse()?,
@@ -186,8 +187,7 @@ mod tests {
 	/// Demonstrates a successful swap response
 	#[test]
 	fn swap_success() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-		let mut rt = tokio::runtime::Builder::new()
-			.threaded_scheduler()
+		let rt = tokio::runtime::Builder::new_multi_thread()
 			.enable_all()
 			.build()?;
 		let commitment = secp::commit(1234, &secp::random_secret())?;
@@ -214,8 +214,7 @@ mod tests {
 
 	#[test]
 	fn swap_bad_request() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-		let mut rt = tokio::runtime::Builder::new()
-			.threaded_scheduler()
+		let rt = tokio::runtime::Builder::new_multi_thread()
 			.enable_all()
 			.build()?;
 		let server: Arc<Mutex<dyn SwapServer>> = Arc::new(Mutex::new(MockSwapServer::new()));
@@ -235,8 +234,7 @@ mod tests {
 	/// Returns "Commitment not found" when there's no matching output in the UTXO set.
 	#[test]
 	fn swap_utxo_missing() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-		let mut rt = tokio::runtime::Builder::new()
-			.threaded_scheduler()
+		let rt = tokio::runtime::Builder::new_multi_thread()
 			.enable_all()
 			.build()?;
 

@@ -1,27 +1,31 @@
-use crate::common::node::IntegrationGrinNode;
-use crate::common::wallet::{GrinWalletManager, IntegrationGrinWallet};
-use grin_core::core::Transaction;
-use grin_onion::crypto::comsig::ComSignature;
-use grin_onion::crypto::dalek::DalekPublicKey;
-use grin_onion::onion::Onion;
-use grin_wallet_impls::tor::process::TorProcess;
-use mwixnet::client::MixClientImpl;
-use mwixnet::{tor, SwapError, SwapServer, SwapStore};
-use secp256k1zkp::SecretKey;
 use std::iter;
 use std::net::TcpListener;
 use std::sync::Arc;
+
+use grin_core::core::Transaction;
+use tor_rtcompat::PreferredRuntime;
 use x25519_dalek::{PublicKey as xPublicKey, StaticSecret};
 
-pub struct IntegrationSwapServer {
+use grin_onion::crypto::comsig::ComSignature;
+use grin_onion::crypto::dalek::DalekPublicKey;
+use grin_onion::onion::Onion;
+use mwixnet::mix_client::MixClientImpl;
+use mwixnet::tor::TorService;
+use mwixnet::{tor, SwapError, SwapServer, SwapStore};
+use secp256k1zkp::SecretKey;
+
+use crate::common::node::IntegrationGrinNode;
+use crate::common::wallet::{GrinWalletManager, IntegrationGrinWallet};
+
+pub struct IntegrationSwapServer<R: tor_rtcompat::Runtime> {
 	server_key: SecretKey,
-	tor_process: TorProcess,
+	tor_instance: Arc<grin_util::Mutex<TorService<R>>>,
 	swap_server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
 	rpc_server: jsonrpc_http_server::Server,
 	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
 }
 
-impl IntegrationSwapServer {
+impl<R: tor_rtcompat::Runtime> IntegrationSwapServer<R> {
 	pub async fn async_swap(&self, onion: &Onion, comsig: &ComSignature) -> Result<(), SwapError> {
 		self.swap_server.lock().await.swap(&onion, &comsig).await
 	}
@@ -31,31 +35,31 @@ impl IntegrationSwapServer {
 	}
 }
 
-pub struct IntegrationMixServer {
+pub struct IntegrationMixServer<R: tor_rtcompat::Runtime> {
 	server_key: SecretKey,
-	tor_process: TorProcess,
+	tor_instance: Arc<grin_util::Mutex<TorService<R>>>,
 	rpc_server: jsonrpc_http_server::Server,
 	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
 }
 
-async fn async_new_swap_server(
+async fn async_new_swap_server<R>(
 	data_dir: &str,
 	rt_handle: &tokio::runtime::Handle,
+	tor_runtime: R,
 	wallets: &mut GrinWalletManager,
 	server_key: &SecretKey,
 	node: &Arc<grin_util::Mutex<IntegrationGrinNode>>,
-	next_server: Option<&IntegrationMixServer>,
-) -> IntegrationSwapServer {
+	next_server: Option<&IntegrationMixServer<R>>,
+) -> IntegrationSwapServer<R>
+where
+	R: tor_rtcompat::Runtime,
+{
 	let wallet = wallets.async_new_wallet(&node.lock().api_address()).await;
 
 	let server_config = mwixnet::ServerConfig {
 		key: server_key.clone(),
 		interval_s: 15,
 		addr: TcpListener::bind("127.0.0.1:0")
-			.unwrap()
-			.local_addr()
-			.unwrap(),
-		socks_proxy_addr: TcpListener::bind("127.0.0.1:0")
 			.unwrap()
 			.local_addr()
 			.unwrap(),
@@ -72,7 +76,10 @@ async fn async_new_swap_server(
 
 	// Open SwapStore
 	let store = SwapStore::new(format!("{}/db", data_dir).as_str()).unwrap();
-	let tor_process = tor::init_tor_listener(&data_dir, &server_config).unwrap();
+	let tor_instance = tor::async_init_tor(tor_runtime, &data_dir, &server_config)
+		.await
+		.unwrap();
+	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
 
 	let (swap_server, rpc_server) = mwixnet::swap_listen(
 		rt_handle,
@@ -80,6 +87,7 @@ async fn async_new_swap_server(
 		match next_server {
 			Some(s) => Some(Arc::new(MixClientImpl::new(
 				server_config.clone(),
+				tor_instance.clone(),
 				DalekPublicKey::from_secret(&s.server_key),
 			))),
 			None => None,
@@ -92,31 +100,31 @@ async fn async_new_swap_server(
 
 	IntegrationSwapServer {
 		server_key: server_key.clone(),
-		tor_process,
+		tor_instance,
 		swap_server,
 		rpc_server,
 		_wallet: wallet,
 	}
 }
 
-async fn async_new_mix_server(
+async fn async_new_mix_server<R>(
 	data_dir: &str,
 	rt_handle: &tokio::runtime::Handle,
+	tor_runtime: R,
 	wallets: &mut GrinWalletManager,
 	server_key: &SecretKey,
 	node: &Arc<grin_util::Mutex<IntegrationGrinNode>>,
 	prev_server: DalekPublicKey,
-	next_server: Option<&IntegrationMixServer>,
-) -> IntegrationMixServer {
+	next_server: Option<&IntegrationMixServer<R>>,
+) -> IntegrationMixServer<R>
+where
+	R: tor_rtcompat::Runtime,
+{
 	let wallet = wallets.async_new_wallet(&node.lock().api_address()).await;
 	let server_config = mwixnet::ServerConfig {
 		key: server_key.clone(),
 		interval_s: 15,
 		addr: TcpListener::bind("127.0.0.1:0")
-			.unwrap()
-			.local_addr()
-			.unwrap(),
-		socks_proxy_addr: TcpListener::bind("127.0.0.1:0")
 			.unwrap()
 			.local_addr()
 			.unwrap(),
@@ -131,7 +139,10 @@ async fn async_new_mix_server(
 		},
 	};
 
-	let tor_process = tor::init_tor_listener(&data_dir, &server_config).unwrap();
+	let tor_instance = tor::async_init_tor(tor_runtime, &data_dir, &server_config)
+		.await
+		.unwrap();
+	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
 
 	let (_, rpc_server) = mwixnet::mix_listen(
 		rt_handle,
@@ -139,6 +150,7 @@ async fn async_new_mix_server(
 		match next_server {
 			Some(s) => Some(Arc::new(MixClientImpl::new(
 				server_config.clone(),
+				tor_instance.clone(),
 				DalekPublicKey::from_secret(&s.server_key),
 			))),
 			None => None,
@@ -150,16 +162,16 @@ async fn async_new_mix_server(
 
 	IntegrationMixServer {
 		server_key: server_key.clone(),
-		tor_process,
+		tor_instance,
 		rpc_server,
 		_wallet: wallet,
 	}
 }
 
 pub struct Servers {
-	pub swapper: IntegrationSwapServer,
+	pub swapper: IntegrationSwapServer<PreferredRuntime>,
 
-	pub mixers: Vec<IntegrationMixServer>,
+	pub mixers: Vec<IntegrationMixServer<PreferredRuntime>>,
 }
 
 impl Servers {
@@ -176,12 +188,16 @@ impl Servers {
 				.take(num_mixers + 1)
 				.collect();
 
+		// Setup mock tor network
+		let tor_runtime = PreferredRuntime::current().unwrap();
+
 		// Build mixers in reverse order
 		let mut mixers = Vec::new();
 		for i in (0..num_mixers).rev() {
 			let mix_server = async_new_mix_server(
 				format!("{}/mixers/{}", test_dir, i).as_str(),
 				rt_handle,
+				tor_runtime.clone(),
 				wallets,
 				&server_keys[i + 1],
 				&node,
@@ -206,6 +222,7 @@ impl Servers {
 		let swapper = async_new_swap_server(
 			format!("{}/swapper", test_dir).as_str(),
 			rt_handle,
+			tor_runtime.clone(),
 			wallets,
 			&server_keys[0],
 			&node,
@@ -234,11 +251,11 @@ impl Servers {
 
 	pub fn stop_all(&mut self) {
 		self.swapper.rpc_server.close_handle().close();
-		self.swapper.tor_process.kill().unwrap();
+		self.swapper.tor_instance.lock().stop();
 
 		self.mixers.iter_mut().for_each(|mixer| {
 			mixer.rpc_server.close_handle().close();
-			mixer.tor_process.kill().unwrap();
+			mixer.tor_instance.lock().stop();
 		});
 	}
 }

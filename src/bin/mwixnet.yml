@@ -38,10 +38,6 @@ args:
       help: Address to bind the rpc server to (e.g. 127.0.0.1:3000)
       long: bind_addr
       takes_value: true
-  - socks_addr:
-      help: Address to bind the SOCKS5 tor proxy to (e.g. 127.0.0.1:3001)
-      long: socks_addr
-      takes_value: true
   - prev_server:
       help: Hex public key of the previous swap/mix server
       long: prev_server
