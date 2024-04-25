@@ -6,33 +6,33 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-blake2 = { package = "blake2-rfc", version = "0.2"}
+blake2 = { package = "blake2-rfc", version = "0.2" }
 byteorder = "1"
 bytes = "0.5.6"
 chacha20 = "0.8.1"
 curve25519-dalek = "2.1"
 ed25519-dalek = "1.0.1"
-hmac = { version = "0.12.0", features = ["std"]}
-itertools = { version = "0.10.3"}
+hmac = { version = "0.12.0", features = ["std"] }
+itertools = { version = "0.10.3" }
 lazy_static = "1"
 rand = "0.7.3"
 rpassword = "4.0"
-serde = { version = "1", features= ["derive"]}
+serde = { version = "1", features = ["derive"] }
 serde_derive = "1"
 serde_json = "1"
 sha2 = "0.10.0"
 thiserror = "1"
 toml = "0.5"
 x25519-dalek = "0.6.0"
-grin_secp256k1zkp = { version = "0.7.12", features = ["bullet-proof-sizing"]}
-grin_api = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
-grin_core = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
-grin_chain = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
-grin_keychain = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
-grin_servers = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
-grin_store = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
-grin_util = { git = "https://github.com/mimblewimble/grin", tag = "v5.2.0-beta.3" }
-grin_wallet_api = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
-grin_wallet_impls = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
-grin_wallet_libwallet = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
-grin_wallet_util = { git = "https://github.com/mimblewimble/grin-wallet", version = "5.2.0-beta.1" }
+grin_secp256k1zkp = { version = "0.7.13", features = ["bullet-proof-sizing"] }
+grin_api = "5.3.0"
+grin_core = "5.3.0"
+grin_chain = "5.3.0"
+grin_keychain = "5.3.0"
+grin_servers = "5.3.0"
+grin_store = "5.3.0"
+grin_util = "5.3.0"
+grin_wallet_api = "5.3.0"
+grin_wallet_impls = "5.3.0"
+grin_wallet_libwallet = "5.3.0"
+grin_wallet_util = "5.3.0"
