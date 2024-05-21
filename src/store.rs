@@ -1,9 +1,5 @@
+use grin_core::core::{Input, Transaction};
 use grin_core::core::hash::Hash;
-use grin_onion::crypto::secp::{self, Commitment, RangeProof, SecretKey};
-use grin_onion::onion::Onion;
-use grin_onion::util::{read_optional, write_optional};
-
-use grin_core::core::Input;
 use grin_core::ser::{
 	self, DeserializationMode, ProtocolVersion, Readable, Reader, Writeable, Writer,
 };
@@ -11,18 +7,30 @@ use grin_store::{self as store, Store};
 use grin_util::ToHex;
 use thiserror::Error;
 
+use grin_onion::crypto::secp::{self, Commitment, RangeProof, SecretKey};
+use grin_onion::onion::Onion;
+use grin_onion::util::{read_optional, write_optional};
+
 const DB_NAME: &str = "swap";
 const STORE_SUBPATH: &str = "swaps";
 
-const CURRENT_VERSION: u8 = 0;
+const CURRENT_SWAP_VERSION: u8 = 0;
 const SWAP_PREFIX: u8 = b'S';
+
+const CURRENT_TX_VERSION: u8 = 0;
+const TX_PREFIX: u8 = b'T';
 
 /// Swap statuses
 #[derive(Clone, Debug, PartialEq)]
 pub enum SwapStatus {
 	Unprocessed,
-	InProcess { kernel_hash: Hash },
-	Completed { kernel_hash: Hash, block_hash: Hash },
+	InProcess {
+		kernel_commit: Commitment,
+	},
+	Completed {
+		kernel_commit: Commitment,
+		block_hash: Hash,
+	},
 	Failed,
 }
 
@@ -32,16 +40,16 @@ impl Writeable for SwapStatus {
 			SwapStatus::Unprocessed => {
 				writer.write_u8(0)?;
 			}
-			SwapStatus::InProcess { kernel_hash } => {
+			SwapStatus::InProcess { kernel_commit } => {
 				writer.write_u8(1)?;
-				kernel_hash.write(writer)?;
+				kernel_commit.write(writer)?;
 			}
 			SwapStatus::Completed {
-				kernel_hash,
+				kernel_commit,
 				block_hash,
 			} => {
 				writer.write_u8(2)?;
-				kernel_hash.write(writer)?;
+				kernel_commit.write(writer)?;
 				block_hash.write(writer)?;
 			}
 			SwapStatus::Failed => {
@@ -58,14 +66,14 @@ impl Readable for SwapStatus {
 		let status = match reader.read_u8()? {
 			0 => SwapStatus::Unprocessed,
 			1 => {
-				let kernel_hash = Hash::read(reader)?;
-				SwapStatus::InProcess { kernel_hash }
+				let kernel_commit = Commitment::read(reader)?;
+				SwapStatus::InProcess { kernel_commit }
 			}
 			2 => {
-				let kernel_hash = Hash::read(reader)?;
+				let kernel_commit = Commitment::read(reader)?;
 				let block_hash = Hash::read(reader)?;
 				SwapStatus::Completed {
-					kernel_hash,
+					kernel_commit,
 					block_hash,
 				}
 			}
@@ -99,7 +107,7 @@ pub struct SwapData {
 
 impl Writeable for SwapData {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ser::Error> {
-		writer.write_u8(CURRENT_VERSION)?;
+		writer.write_u8(CURRENT_SWAP_VERSION)?;
 		writer.write_fixed_bytes(&self.excess)?;
 		writer.write_fixed_bytes(&self.output_commit)?;
 		write_optional(writer, &self.rangeproof)?;
@@ -115,7 +123,7 @@ impl Writeable for SwapData {
 impl Readable for SwapData {
 	fn read<R: Reader>(reader: &mut R) -> Result<SwapData, ser::Error> {
 		let version = reader.read_u8()?;
-		if version != CURRENT_VERSION {
+		if version != CURRENT_SWAP_VERSION {
 			return Err(ser::Error::UnsupportedProtocolVersion);
 		}
 
@@ -138,6 +146,41 @@ impl Readable for SwapData {
 	}
 }
 
+/// A transaction created as part of a swap round.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwapTx {
+	pub tx: Transaction,
+	pub chain_tip: (u64, Hash),
+	// TODO: Include status
+}
+
+impl Writeable for SwapTx {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ser::Error> {
+		writer.write_u8(CURRENT_TX_VERSION)?;
+		self.tx.write(writer)?;
+		writer.write_u64(self.chain_tip.0)?;
+		self.chain_tip.1.write(writer)?;
+		Ok(())
+	}
+}
+
+impl Readable for SwapTx {
+	fn read<R: Reader>(reader: &mut R) -> Result<SwapTx, ser::Error> {
+		let version = reader.read_u8()?;
+		if version != CURRENT_TX_VERSION {
+			return Err(ser::Error::UnsupportedProtocolVersion);
+		}
+
+		let tx = Transaction::read(reader)?;
+		let height = reader.read_u64()?;
+		let block_hash = Hash::read(reader)?;
+		Ok(SwapTx {
+			tx,
+			chain_tip: (height, block_hash),
+		})
+	}
+}
+
 /// Storage facility for swap data.
 pub struct SwapStore {
 	db: Store,
@@ -148,6 +191,8 @@ pub struct SwapStore {
 pub enum StoreError {
 	#[error("Swap entry already exists for '{0:?}'")]
 	AlreadyExists(Commitment),
+	#[error("Entry does not exist for '{0:?}'")]
+	NotFound(Commitment),
 	#[error("Error occurred while attempting to open db: {0}")]
 	OpenError(store::lmdb::Error),
 	#[error("Serialization error occurred: {0}")]
@@ -193,7 +238,7 @@ impl SwapStore {
 
 	/// Reads a single value by key
 	fn read<K: AsRef<[u8]> + Copy, V: Readable>(&self, prefix: u8, k: K) -> Result<V, StoreError> {
-		store::option_to_not_found(self.db.get_ser(&store::to_key(prefix, k)[..], None), || {
+		store::option_to_not_found(self.db.get_ser(&store::to_key(prefix, k), None), || {
 			format!("{}:{}", prefix, k.to_hex())
 		})
 		.map_err(StoreError::ReadError)
@@ -236,22 +281,42 @@ impl SwapStore {
 	}
 
 	/// Reads a swap from the database
-	#[allow(dead_code)]
 	pub fn get_swap(&self, input_commit: &Commitment) -> Result<SwapData, StoreError> {
 		self.read(SWAP_PREFIX, input_commit)
+	}
+
+	/// Saves a swap transaction to the database
+	pub fn save_swap_tx(&self, s: &SwapTx) -> Result<(), StoreError> {
+		let data = ser::ser_vec(&s, ProtocolVersion::local())?;
+		self.write(
+			TX_PREFIX,
+			&s.tx.kernels().first().unwrap().excess,
+			&data,
+			true,
+		)
+		.map_err(StoreError::WriteError)?;
+
+		Ok(())
+	}
+
+	/// Reads a swap tx from the database
+	pub fn get_swap_tx(&self, kernel_excess: &Commitment) -> Result<SwapTx, StoreError> {
+		self.read(TX_PREFIX, kernel_excess)
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use crate::store::{SwapData, SwapStatus, SwapStore};
-	use crate::StoreError;
+	use std::cmp::Ordering;
+
 	use grin_core::core::{Input, OutputFeatures};
 	use grin_core::global::{self, ChainTypes};
+	use rand::RngCore;
+
 	use grin_onion::crypto::secp;
 	use grin_onion::test_util as onion_test_util;
-	use rand::RngCore;
-	use std::cmp::Ordering;
+
+	use crate::store::{StoreError, SwapData, SwapStatus, SwapStore};
 
 	fn new_store(test_name: &str) -> SwapStore {
 		global::set_local_chain_type(ChainTypes::AutomatedTesting);
@@ -278,11 +343,11 @@ mod tests {
 			SwapStatus::Unprocessed
 		} else if s == 1 {
 			SwapStatus::InProcess {
-				kernel_hash: onion_test_util::rand_hash(),
+				kernel_commit: onion_test_util::rand_commit(),
 			}
 		} else {
 			SwapStatus::Completed {
-				kernel_hash: onion_test_util::rand_hash(),
+				kernel_commit: onion_test_util::rand_commit(),
 				block_hash: onion_test_util::rand_hash(),
 			}
 		};
@@ -330,7 +395,7 @@ mod tests {
 		assert!(store.swap_exists(&swap.input.commit)?);
 
 		swap.status = SwapStatus::InProcess {
-			kernel_hash: onion_test_util::rand_hash(),
+			kernel_commit: onion_test_util::rand_commit(),
 		};
 		let result = store.save_swap(&swap, false);
 		assert_eq!(

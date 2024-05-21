@@ -1,22 +1,24 @@
-use crate::client::MixClient;
-use crate::config::ServerConfig;
-use crate::crypto::comsig::ComSignature;
-use crate::crypto::secp::{Commitment, Secp256k1, SecretKey};
-use crate::node::{self, GrinNode};
-use crate::store::{StoreError, SwapData, SwapStatus, SwapStore};
-use crate::tx;
-use crate::wallet::Wallet;
-
-use grin_core::core::hash::Hashed;
-use grin_core::core::{Input, Output, OutputFeatures, Transaction, TransactionBody};
-use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
-use grin_onion::onion::{Onion, OnionError};
-use itertools::Itertools;
-use secp256k1zkp::key::ZERO_KEY;
 use std::collections::HashSet;
 use std::result::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use grin_core::core::{Committed, Input, Output, OutputFeatures, Transaction, TransactionBody};
+use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
+use itertools::Itertools;
+use secp256k1zkp::key::ZERO_KEY;
 use thiserror::Error;
+
+use grin_onion::crypto::comsig::ComSignature;
+use grin_onion::crypto::secp::{Commitment, Secp256k1, SecretKey};
+use grin_onion::onion::{Onion, OnionError};
+
+use crate::config::ServerConfig;
+use crate::mix_client::MixClient;
+use crate::node::{self, GrinNode};
+use crate::store::{StoreError, SwapData, SwapStatus, SwapStore, SwapTx};
+use crate::tx;
+use crate::wallet::Wallet;
 
 /// Swap error types
 #[derive(Clone, Error, Debug, PartialEq)]
@@ -39,20 +41,53 @@ pub enum SwapError {
 	FeeTooLow { minimum_fee: u64, actual_fee: u64 },
 	#[error("Error saving swap to data store: {0}")]
 	StoreError(StoreError),
+	#[error("Error building transaction: {0}")]
+	TxError(String),
+	#[error("Node communication error: {0}")]
+	NodeError(String),
 	#[error("Client communication error: {0:?}")]
 	ClientError(String),
+	#[error("Swap transaction not found: {0:?}")]
+	SwapTxNotFound(Commitment),
 	#[error("{0}")]
 	UnknownError(String),
 }
 
+impl From<StoreError> for SwapError {
+	fn from(e: StoreError) -> SwapError {
+		SwapError::StoreError(e)
+	}
+}
+
+impl From<tx::TxError> for SwapError {
+	fn from(e: tx::TxError) -> SwapError {
+		SwapError::TxError(e.to_string())
+	}
+}
+
+impl From<node::NodeError> for SwapError {
+	fn from(e: node::NodeError) -> SwapError {
+		SwapError::NodeError(e.to_string())
+	}
+}
+
 /// A public MWixnet server - the "Swap Server"
+#[async_trait]
 pub trait SwapServer: Send + Sync {
 	/// Submit a new output to be swapped.
-	fn swap(&self, onion: &Onion, comsig: &ComSignature) -> Result<(), SwapError>;
+	async fn swap(&self, onion: &Onion, comsig: &ComSignature) -> Result<(), SwapError>;
 
 	/// Iterate through all saved submissions, filter out any inputs that are no longer spendable,
 	/// and assemble the coinswap transaction, posting the transaction to the configured node.
-	fn execute_round(&self) -> Result<Option<Transaction>, Box<dyn std::error::Error>>;
+	async fn execute_round(&self) -> Result<Option<Arc<Transaction>>, SwapError>;
+
+	/// Verify the previous swap transaction is in the active chain or mempool.
+	/// If it's not, rebroacast the transaction if it's still valid.
+	/// If the transaction is no longer valid, perform the swap again.
+	async fn check_reorg(
+		&self,
+		tx: &Arc<Transaction>,
+	) -> Result<Option<Arc<Transaction>>, SwapError>;
 }
 
 /// The standard MWixnet server implementation
@@ -62,7 +97,7 @@ pub struct SwapServerImpl {
 	next_server: Option<Arc<dyn MixClient>>,
 	wallet: Arc<dyn Wallet>,
 	node: Arc<dyn GrinNode>,
-	store: Arc<Mutex<SwapStore>>,
+	store: Arc<tokio::sync::Mutex<SwapStore>>,
 }
 
 impl SwapServerImpl {
@@ -79,7 +114,7 @@ impl SwapServerImpl {
 			next_server,
 			wallet,
 			node,
-			store: Arc::new(Mutex::new(store)),
+			store: Arc::new(tokio::sync::Mutex::new(store)),
 		}
 	}
 
@@ -93,10 +128,127 @@ impl SwapServerImpl {
 	fn get_minimum_swap_fee(&self) -> u64 {
 		TransactionBody::weight_by_iok(1, 1, 1) * self.get_fee_base()
 	}
+
+	async fn async_is_spendable(&self, next_block_height: u64, swap: &SwapData) -> bool {
+		if let SwapStatus::Unprocessed = swap.status {
+			if node::async_is_spendable(&self.node, &swap.input.commit, next_block_height)
+				.await
+				.unwrap_or(false)
+			{
+				if !node::async_is_unspent(&self.node, &swap.output_commit)
+					.await
+					.unwrap_or(true)
+				{
+					return true;
+				}
+			}
+		}
+
+		false
+	}
+
+	async fn async_execute_round(
+		&self,
+		store: &SwapStore,
+		mut swaps: Vec<SwapData>,
+	) -> Result<Option<Arc<Transaction>>, SwapError> {
+		swaps.sort_by(|a, b| a.output_commit.partial_cmp(&b.output_commit).unwrap());
+
+		if swaps.len() == 0 {
+			return Ok(None);
+		}
+
+		let (filtered, failed, offset, outputs, kernels) = if let Some(client) = &self.next_server {
+			// Call next mix server
+			let onions = swaps.iter().map(|s| s.onion.clone()).collect();
+			let mixed = client
+				.mix_outputs(&onions)
+				.await
+				.map_err(|e| SwapError::ClientError(e.to_string()))?;
+
+			// Filter out failed entries
+			let kept_indices = HashSet::<_>::from_iter(mixed.indices.clone());
+			let filtered = swaps
+				.iter()
+				.enumerate()
+				.filter(|(i, _)| kept_indices.contains(i))
+				.map(|(_, j)| j.clone())
+				.collect();
+
+			let failed = swaps
+				.iter()
+				.enumerate()
+				.filter(|(i, _)| !kept_indices.contains(i))
+				.map(|(_, j)| j.clone())
+				.collect();
+
+			(
+				filtered,
+				failed,
+				mixed.components.offset,
+				mixed.components.outputs,
+				mixed.components.kernels,
+			)
+		} else {
+			// Build plain outputs for each swap entry
+			let outputs: Vec<Output> = swaps
+				.iter()
+				.map(|s| {
+					Output::new(
+						OutputFeatures::Plain,
+						s.output_commit,
+						s.rangeproof.unwrap(),
+					)
+				})
+				.collect();
+
+			(swaps, Vec::new(), ZERO_KEY, outputs, Vec::new())
+		};
+
+		let fees_paid: u64 = filtered.iter().map(|s| s.fee).sum();
+		let inputs: Vec<Input> = filtered.iter().map(|s| s.input).collect();
+		let output_excesses: Vec<SecretKey> = filtered.iter().map(|s| s.excess.clone()).collect();
+
+		let tx = tx::async_assemble_tx(
+			&self.wallet,
+			&inputs,
+			&outputs,
+			&kernels,
+			self.get_fee_base(),
+			fees_paid,
+			&offset,
+			&output_excesses,
+		)
+		.await?;
+
+		let chain_tip = self.node.async_get_chain_tip().await?;
+		self.node.async_post_tx(&tx).await?;
+
+		store.save_swap_tx(&SwapTx {
+			tx: tx.clone(),
+			chain_tip,
+		})?;
+
+		// Update status to in process
+		let kernel_commit = tx.kernels().first().unwrap().excess;
+		for mut swap in filtered {
+			swap.status = SwapStatus::InProcess { kernel_commit };
+			store.save_swap(&swap, true)?;
+		}
+
+		// Update status of failed swaps
+		for mut swap in failed {
+			swap.status = SwapStatus::Failed;
+			store.save_swap(&swap, true)?;
+		}
+
+		Ok(Some(Arc::new(tx)))
+	}
 }
 
+#[async_trait]
 impl SwapServer for SwapServerImpl {
-	fn swap(&self, onion: &Onion, comsig: &ComSignature) -> Result<(), SwapError> {
+	async fn swap(&self, onion: &Onion, comsig: &ComSignature) -> Result<(), SwapError> {
 		// Verify that more than 1 payload exists when there's a next server,
 		// or that exactly 1 payload exists when this is the final server
 		if self.server_config.next_server.is_some() && onion.enc_payloads.len() <= 1
@@ -114,7 +266,8 @@ impl SwapServer for SwapServerImpl {
 			.map_err(|_| SwapError::InvalidComSignature)?;
 
 		// Verify that commitment is unspent
-		let input = node::build_input(&self.node, &onion.commit)
+		let input = node::async_build_input(&self.node, &onion.commit)
+			.await
 			.map_err(|e| SwapError::UnknownError(e.to_string()))?;
 		let input = input.ok_or(SwapError::CoinNotFound {
 			commit: onion.commit.clone(),
@@ -144,7 +297,7 @@ impl SwapServer for SwapServerImpl {
 			return Err(SwapError::MissingRangeproof);
 		}
 
-		let locked = self.store.lock().unwrap();
+		let locked = self.store.lock().await;
 
 		locked
 			.save_swap(
@@ -153,7 +306,7 @@ impl SwapServer for SwapServerImpl {
 					output_commit: peeled.onion.commit,
 					rangeproof: peeled.payload.rangeproof,
 					input,
-					fee: fee as u64,
+					fee,
 					onion: peeled.onion,
 					status: SwapStatus::Unprocessed,
 				},
@@ -168,110 +321,77 @@ impl SwapServer for SwapServerImpl {
 		Ok(())
 	}
 
-	fn execute_round(&self) -> Result<Option<Transaction>, Box<dyn std::error::Error>> {
-		let locked_store = self.store.lock().unwrap();
-		let next_block_height = self.node.get_chain_height()? + 1;
+	async fn execute_round(&self) -> Result<Option<Arc<Transaction>>, SwapError> {
+		let next_block_height = self.node.async_get_chain_tip().await?.0 + 1;
 
-		let spendable: Vec<SwapData> = locked_store
+		let locked_store = self.store.lock().await;
+		let swaps: Vec<SwapData> = locked_store
 			.swaps_iter()?
 			.unique_by(|s| s.output_commit)
-			.filter(|s| match s.status {
-				SwapStatus::Unprocessed => true,
-				_ => false,
-			})
-			.filter(|s| {
-				node::is_spendable(&self.node, &s.input.commit, next_block_height).unwrap_or(false)
-			})
-			.filter(|s| !node::is_unspent(&self.node, &s.output_commit).unwrap_or(true))
-			.sorted_by(|a, b| a.output_commit.partial_cmp(&b.output_commit).unwrap())
 			.collect();
-
-		if spendable.len() == 0 {
-			return Ok(None);
+		let mut spendable: Vec<SwapData> = vec![];
+		for swap in &swaps {
+			if self.async_is_spendable(next_block_height, &swap).await {
+				spendable.push(swap.clone());
+			}
 		}
 
-		let (filtered, failed, offset, outputs, kernels) = if let Some(client) = &self.next_server {
-			// Call next mix server
-			let onions = spendable.iter().map(|s| s.onion.clone()).collect();
-			let (indices, mixed) = client
-				.mix_outputs(&onions)
-				.map_err(|e| SwapError::ClientError(e.to_string()))?;
+		self.async_execute_round(&locked_store, swaps).await
+	}
 
-			// Filter out failed entries
-			let kept_indices = HashSet::<_>::from_iter(indices.clone());
-			let filtered = spendable
-				.iter()
-				.enumerate()
-				.filter(|(i, _)| kept_indices.contains(i))
-				.map(|(_, j)| j.clone())
-				.collect();
+	async fn check_reorg(
+		&self,
+		tx: &Arc<Transaction>,
+	) -> Result<Option<Arc<Transaction>>, SwapError> {
+		let excess = tx.kernels().first().unwrap().excess;
+		let locked_store = self.store.lock().await;
+		if let Ok(swap_tx) = locked_store.get_swap_tx(&excess) {
+			// If kernel is in active chain, return tx
+			if self
+				.node
+				.async_get_kernel(&excess, Some(swap_tx.chain_tip.0), None)
+				.await?
+				.is_some()
+			{
+				return Ok(Some(tx.clone()));
+			}
 
-			let failed = spendable
-				.iter()
-				.enumerate()
-				.filter(|(i, _)| !kept_indices.contains(i))
-				.map(|(_, j)| j.clone())
-				.collect();
+			// If transaction is still valid, rebroadcast and return tx
+			if node::async_is_tx_valid(&self.node, &tx).await? {
+				self.node.async_post_tx(&tx).await?;
+				return Ok(Some(tx.clone()));
+			}
 
-			(filtered, failed, mixed.offset, mixed.outputs, mixed.kernels)
+			// Collect all swaps based on tx's inputs, and execute_round with those swaps
+			let next_block_height = self.node.async_get_chain_tip().await?.0 + 1;
+			let mut swaps = Vec::new();
+			for input_commit in &tx.inputs_committed() {
+				if let Ok(swap) = locked_store.get_swap(&input_commit) {
+					if self.async_is_spendable(next_block_height, &swap).await {
+						swaps.push(swap);
+					}
+				}
+			}
+
+			self.async_execute_round(&locked_store, swaps).await
 		} else {
-			// Build plain outputs for each swap entry
-			let outputs: Vec<Output> = spendable
-				.iter()
-				.map(|s| {
-					Output::new(
-						OutputFeatures::Plain,
-						s.output_commit,
-						s.rangeproof.unwrap(),
-					)
-				})
-				.collect();
-
-			(spendable, Vec::new(), ZERO_KEY, outputs, Vec::new())
-		};
-
-		let fees_paid: u64 = filtered.iter().map(|s| s.fee).sum();
-		let inputs: Vec<Input> = filtered.iter().map(|s| s.input).collect();
-		let output_excesses: Vec<SecretKey> = filtered.iter().map(|s| s.excess.clone()).collect();
-
-		let tx = tx::assemble_tx(
-			&self.wallet,
-			&inputs,
-			&outputs,
-			&kernels,
-			self.get_fee_base(),
-			fees_paid,
-			&offset,
-			&output_excesses,
-		)?;
-
-		self.node.post_tx(&tx)?;
-
-		// Update status to in process
-		let kernel_hash = tx.kernels().first().unwrap().hash();
-		for mut swap in filtered {
-			swap.status = SwapStatus::InProcess { kernel_hash };
-			locked_store.save_swap(&swap, true)?;
+			Err(SwapError::SwapTxNotFound(excess))
 		}
-
-		// Update status of failed swaps
-		for mut swap in failed {
-			swap.status = SwapStatus::Failed;
-			locked_store.save_swap(&swap, true)?;
-		}
-
-		Ok(Some(tx))
 	}
 }
 
 #[cfg(test)]
 pub mod mock {
-	use super::{SwapError, SwapServer};
-	use crate::crypto::comsig::ComSignature;
-
-	use grin_core::core::Transaction;
-	use grin_onion::onion::Onion;
 	use std::collections::HashMap;
+	use std::sync::Arc;
+
+	use async_trait::async_trait;
+	use grin_core::core::Transaction;
+
+	use grin_onion::crypto::comsig::ComSignature;
+	use grin_onion::onion::Onion;
+
+	use super::{SwapError, SwapServer};
 
 	pub struct MockSwapServer {
 		errors: HashMap<Onion, SwapError>,
@@ -289,8 +409,9 @@ pub mod mock {
 		}
 	}
 
+	#[async_trait]
 	impl SwapServer for MockSwapServer {
-		fn swap(&self, onion: &Onion, _comsig: &ComSignature) -> Result<(), SwapError> {
+		async fn swap(&self, onion: &Onion, _comsig: &ComSignature) -> Result<(), SwapError> {
 			if let Some(e) = self.errors.get(&onion) {
 				return Err(e.clone());
 			}
@@ -298,20 +419,32 @@ pub mod mock {
 			Ok(())
 		}
 
-		fn execute_round(&self) -> Result<Option<Transaction>, Box<dyn std::error::Error>> {
+		async fn execute_round(&self) -> Result<Option<Arc<Transaction>>, SwapError> {
 			Ok(None)
+		}
+
+		async fn check_reorg(
+			&self,
+			tx: &Arc<Transaction>,
+		) -> Result<Option<Arc<Transaction>>, SwapError> {
+			Ok(Some(tx.clone()))
 		}
 	}
 }
 
 #[cfg(test)]
 pub mod test_util {
-	use crate::crypto::dalek::DalekPublicKey;
-	use crate::crypto::secp::SecretKey;
-	use crate::servers::swap::SwapServerImpl;
-	use crate::wallet::mock::MockWallet;
-	use crate::{config, GrinNode, MixClient, SwapStore};
 	use std::sync::Arc;
+
+	use grin_onion::crypto::dalek::DalekPublicKey;
+	use grin_onion::crypto::secp::SecretKey;
+
+	use crate::config;
+	use crate::mix_client::MixClient;
+	use crate::node::GrinNode;
+	use crate::servers::swap::SwapServerImpl;
+	use crate::store::SwapStore;
+	use crate::wallet::mock::MockWallet;
 
 	pub fn new_swapper(
 		test_dir: &str,
@@ -339,23 +472,28 @@ pub mod test_util {
 
 #[cfg(test)]
 mod tests {
-	use crate::node::mock::MockGrinNode;
-	use crate::servers::swap::{SwapError, SwapServer};
-	use crate::store::{SwapData, SwapStatus};
-	use crate::tx::TxComponents;
-	use crate::{client, tx, MixClient};
+	use std::sync::Arc;
 
 	use ::function_name::named;
-	use grin_core::core::hash::Hashed;
-	use grin_core::core::{Committed, Input, Output, OutputFeatures, Transaction, Weighting};
+	use grin_core::core::{
+		Committed, Input, Inputs, Output, OutputFeatures, Transaction, Weighting,
+	};
+	use secp256k1zkp::key::ZERO_KEY;
+	use x25519_dalek::PublicKey as xPublicKey;
+
 	use grin_onion::crypto::comsig::ComSignature;
 	use grin_onion::crypto::secp;
 	use grin_onion::onion::Onion;
 	use grin_onion::test_util as onion_test_util;
 	use grin_onion::{create_onion, new_hop, Hop};
-	use secp256k1zkp::key::ZERO_KEY;
-	use std::sync::Arc;
-	use x25519_dalek::PublicKey as xPublicKey;
+
+	use crate::mix_client::{self, MixClient};
+	use crate::node::mock::MockGrinNode;
+	use crate::servers::mix_rpc::MixResp;
+	use crate::servers::swap::{SwapError, SwapServer};
+	use crate::store::{SwapData, SwapStatus};
+	use crate::tx;
+	use crate::tx::TxComponents;
 
 	macro_rules! assert_error_type {
 		($result:expr, $error_type:pat) => {
@@ -380,9 +518,9 @@ mod tests {
 	}
 
 	/// Standalone swap server to demonstrate request validation and onion unwrapping.
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn swap_standalone() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_standalone() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
@@ -400,7 +538,7 @@ mod tests {
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
 		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
-		server.swap(&onion, &comsig)?;
+		server.swap(&onion, &comsig).await?;
 
 		// Make sure entry is added to server.
 		let expected = SwapData {
@@ -418,21 +556,21 @@ mod tests {
 		};
 
 		{
-			let store = server.store.lock().unwrap();
+			let store = server.store.lock().await;
 			assert_eq!(1, store.swaps_iter().unwrap().count());
 			assert!(store.swap_exists(&input_commit).unwrap());
 			assert_eq!(expected, store.get_swap(&input_commit).unwrap());
 		}
 
-		let tx = server.execute_round()?;
+		let tx = server.execute_round().await?;
 		assert!(tx.is_some());
 
 		{
 			// check that status was updated
-			let store = server.store.lock().unwrap();
+			let store = server.store.lock().await;
 			assert!(match store.get_swap(&input_commit)?.status {
-				SwapStatus::InProcess { kernel_hash } =>
-					kernel_hash == tx.unwrap().kernels().first().unwrap().hash(),
+				SwapStatus::InProcess { kernel_commit } =>
+					kernel_commit == tx.unwrap().kernels().first().unwrap().excess,
 				_ => false,
 			});
 		}
@@ -451,9 +589,9 @@ mod tests {
 	}
 
 	/// Multi-server test to verify proper MixClient communication.
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn swap_multiserver() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_multiserver() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		let test_dir = init_test!();
 
 		// Setup input
@@ -486,7 +624,7 @@ mod tests {
 
 		// Mock mixer
 		let mixer_onion = onion.peel_layer(&swap_sk)?.onion;
-		let mut mock_mixer = client::mock::MockMixClient::new();
+		let mut mock_mixer = mix_client::mock::MockMixClient::new();
 		let mixer_response = TxComponents {
 			offset: ZERO_KEY,
 			outputs: vec![Output::new(
@@ -498,7 +636,10 @@ mod tests {
 		};
 		mock_mixer.set_response(
 			&vec![mixer_onion.clone()],
-			(vec![0 as usize], mixer_response),
+			MixResp {
+				indices: vec![0 as usize],
+				components: mixer_response,
+			},
 		);
 
 		let mixer: Arc<dyn MixClient> = Arc::new(mock_mixer);
@@ -508,9 +649,9 @@ mod tests {
 			Some((&mixer_pk, &mixer)),
 			node.clone(),
 		);
-		swapper.swap(&onion, &comsig)?;
+		swapper.swap(&onion, &comsig).await?;
 
-		let tx = swapper.execute_round()?;
+		let tx = swapper.execute_round().await?;
 		assert!(tx.is_some());
 
 		// check that the transaction was posted
@@ -527,9 +668,9 @@ mod tests {
 	}
 
 	/// Returns InvalidPayloadLength when too many payloads are provided.
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn swap_too_many_payloads() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_too_many_payloads() -> Result<(), Box<dyn std::error::Error>> {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
@@ -549,22 +690,19 @@ mod tests {
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
 		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
-		let result = server.swap(&onion, &comsig);
+		let result = server.swap(&onion, &comsig).await;
 		assert_eq!(Err(SwapError::InvalidPayloadLength), result);
 
 		// Make sure no entry is added to the store
-		assert_eq!(
-			0,
-			server.store.lock().unwrap().swaps_iter().unwrap().count()
-		);
+		assert_eq!(0, server.store.lock().await.swaps_iter().unwrap().count());
 
 		Ok(())
 	}
 
 	/// Returns InvalidComSignature when ComSignature fails to verify.
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn swap_invalid_com_signature() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_invalid_com_signature() -> Result<(), Box<dyn std::error::Error>> {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
@@ -585,22 +723,19 @@ mod tests {
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
 		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
-		let result = server.swap(&onion, &comsig);
+		let result = server.swap(&onion, &comsig).await;
 		assert_eq!(Err(SwapError::InvalidComSignature), result);
 
 		// Make sure no entry is added to the store
-		assert_eq!(
-			0,
-			server.store.lock().unwrap().swaps_iter().unwrap().count()
-		);
+		assert_eq!(0, server.store.lock().await.swaps_iter().unwrap().count());
 
 		Ok(())
 	}
 
 	/// Returns InvalidRangeProof when the rangeproof fails to verify for the commitment.
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn swap_invalid_rangeproof() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_invalid_rangeproof() -> Result<(), Box<dyn std::error::Error>> {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
@@ -620,22 +755,19 @@ mod tests {
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
 		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
-		let result = server.swap(&onion, &comsig);
+		let result = server.swap(&onion, &comsig).await;
 		assert_eq!(Err(SwapError::InvalidRangeproof), result);
 
 		// Make sure no entry is added to the store
-		assert_eq!(
-			0,
-			server.store.lock().unwrap().swaps_iter().unwrap().count()
-		);
+		assert_eq!(0, server.store.lock().await.swaps_iter().unwrap().count());
 
 		Ok(())
 	}
 
 	/// Returns MissingRangeproof when no rangeproof is provided.
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn swap_missing_rangeproof() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_missing_rangeproof() -> Result<(), Box<dyn std::error::Error>> {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
@@ -652,22 +784,19 @@ mod tests {
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
 		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
-		let result = server.swap(&onion, &comsig);
+		let result = server.swap(&onion, &comsig).await;
 		assert_eq!(Err(SwapError::MissingRangeproof), result);
 
 		// Make sure no entry is added to the store
-		assert_eq!(
-			0,
-			server.store.lock().unwrap().swaps_iter().unwrap().count()
-		);
+		assert_eq!(0, server.store.lock().await.swaps_iter().unwrap().count());
 
 		Ok(())
 	}
 
 	/// Returns CoinNotFound when there's no matching output in the UTXO set.
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn swap_utxo_missing() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_utxo_missing() -> Result<(), Box<dyn std::error::Error>> {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
@@ -686,7 +815,7 @@ mod tests {
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new());
 		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
-		let result = server.swap(&onion, &comsig);
+		let result = server.swap(&onion, &comsig).await;
 		assert_eq!(
 			Err(SwapError::CoinNotFound {
 				commit: input_commit.clone()
@@ -695,18 +824,15 @@ mod tests {
 		);
 
 		// Make sure no entry is added to the store
-		assert_eq!(
-			0,
-			server.store.lock().unwrap().swaps_iter().unwrap().count()
-		);
+		assert_eq!(0, server.store.lock().await.swaps_iter().unwrap().count());
 
 		Ok(())
 	}
 
 	/// Returns AlreadySwapped when trying to swap the same commitment multiple times.
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn swap_already_swapped() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_already_swapped() -> Result<(), Box<dyn std::error::Error>> {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
@@ -725,10 +851,10 @@ mod tests {
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
 		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
-		server.swap(&onion, &comsig)?;
+		server.swap(&onion, &comsig).await?;
 
 		// Call swap a second time
-		let result = server.swap(&onion, &comsig);
+		let result = server.swap(&onion, &comsig).await;
 		assert_eq!(
 			Err(SwapError::AlreadySwapped {
 				commit: input_commit.clone()
@@ -739,10 +865,28 @@ mod tests {
 		Ok(())
 	}
 
-	/// Returns PeelOnionFailure when a failure occurs trying to decrypt the onion payload.
-	#[test]
+	/// Returns SwapTxNotFound when trying to check_reorg with a transaction not found in the store.
+	#[tokio::test]
 	#[named]
-	fn swap_peel_onion_failure() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_tx_not_found() -> Result<(), Box<dyn std::error::Error>> {
+		let test_dir = init_test!();
+
+		let server_key = secp::random_secret();
+		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new());
+		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
+		let kern = tx::build_kernel(&secp::random_secret(), 1000u64)?;
+		let tx: Arc<Transaction> =
+			Arc::new(Transaction::new(Inputs::default(), &[], &[kern.clone()]));
+		let result = server.check_reorg(&tx).await;
+		assert_eq!(Err(SwapError::SwapTxNotFound(kern.excess())), result);
+
+		Ok(())
+	}
+
+	/// Returns PeelOnionFailure when a failure occurs trying to decrypt the onion payload.
+	#[tokio::test]
+	#[named]
+	async fn swap_peel_onion_failure() -> Result<(), Box<dyn std::error::Error>> {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
@@ -763,7 +907,7 @@ mod tests {
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
 		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
-		let result = server.swap(&onion, &comsig);
+		let result = server.swap(&onion, &comsig).await;
 
 		assert!(result.is_err());
 		assert_error_type!(result, SwapError::PeelOnionFailure(_));
@@ -772,9 +916,9 @@ mod tests {
 	}
 
 	/// Returns FeeTooLow when the minimum fee is not met.
-	#[test]
+	#[tokio::test]
 	#[named]
-	fn swap_fee_too_low() -> Result<(), Box<dyn std::error::Error>> {
+	async fn swap_fee_too_low() -> Result<(), Box<dyn std::error::Error>> {
 		let test_dir = init_test!();
 
 		let value: u64 = 200_000_000;
@@ -793,11 +937,11 @@ mod tests {
 
 		let node: Arc<MockGrinNode> = Arc::new(MockGrinNode::new_with_utxos(&vec![&input_commit]));
 		let (server, _) = super::test_util::new_swapper(&test_dir, &server_key, None, node.clone());
-		let result = server.swap(&onion, &comsig);
+		let result = server.swap(&onion, &comsig).await;
 		assert_eq!(
 			Err(SwapError::FeeTooLow {
 				minimum_fee: 12_500_000,
-				actual_fee: fee as u64
+				actual_fee: fee as u64,
 			}),
 			result
 		);

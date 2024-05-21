@@ -1,15 +1,15 @@
-pub mod crypto;
-pub mod onion;
-pub mod util;
-
-use crate::crypto::secp::{random_secret, Commitment, SecretKey};
-use crate::onion::{new_stream_cipher, Onion, OnionError, Payload, RawBytes};
-
 use chacha20::cipher::StreamCipher;
 use grin_core::core::FeeFields;
 use secp256k1zkp::pedersen::RangeProof;
-use x25519_dalek::PublicKey as xPublicKey;
 use x25519_dalek::{SharedSecret, StaticSecret};
+use x25519_dalek::PublicKey as xPublicKey;
+
+use crate::crypto::secp::{Commitment, random_secret, SecretKey};
+use crate::onion::{new_stream_cipher, Onion, OnionError, Payload, RawBytes};
+
+pub mod crypto;
+pub mod onion;
+pub mod util;
 
 #[derive(Clone)]
 pub struct Hop {
@@ -28,7 +28,7 @@ pub fn new_hop(
 	Hop {
 		server_pubkey: xPublicKey::from(&StaticSecret::from(server_key.0.clone())),
 		excess: hop_excess.clone(),
-		fee: FeeFields::from(fee as u32),
+		fee: FeeFields::from(fee),
 		rangeproof: proof,
 	}
 }
@@ -71,7 +71,7 @@ pub fn create_onion(commitment: &Commitment, hops: &Vec<Hop>) -> Result<Onion, O
 	for i in (0..shared_secrets.len()).rev() {
 		let mut cipher = new_stream_cipher(&shared_secrets[i])?;
 		for j in i..shared_secrets.len() {
-			cipher.apply_keystream(&mut enc_payloads[j]);
+			cipher.apply_keystream(enc_payloads[j].as_mut_slice());
 		}
 	}
 
@@ -84,14 +84,15 @@ pub fn create_onion(commitment: &Commitment, hops: &Vec<Hop>) -> Result<Onion, O
 }
 
 pub mod test_util {
-	use super::*;
+	use grin_core::core::hash::Hash;
+	use grin_util::ToHex;
+	use rand::{RngCore, thread_rng};
+	use secp256k1zkp::Secp256k1;
+
 	use crate::crypto::dalek::DalekPublicKey;
 	use crate::crypto::secp;
 
-	use grin_core::core::hash::Hash;
-	use grin_util::ToHex;
-	use rand::{thread_rng, RngCore};
-	use secp256k1zkp::Secp256k1;
+	use super::*;
 
 	pub fn rand_onion() -> Onion {
 		let commit = rand_commit();
@@ -116,20 +117,20 @@ pub mod test_util {
 	}
 
 	pub fn rand_commit() -> Commitment {
-		secp::commit(rand::thread_rng().next_u64(), &secp::random_secret()).unwrap()
+		secp::commit(thread_rng().next_u64(), &random_secret()).unwrap()
 	}
 
 	pub fn rand_hash() -> Hash {
-		Hash::from_hex(secp::random_secret().to_hex().as_str()).unwrap()
+		Hash::from_hex(random_secret().to_hex().as_str()).unwrap()
 	}
 
 	pub fn rand_proof() -> RangeProof {
 		let secp = Secp256k1::new();
 		secp.bullet_proof(
-			rand::thread_rng().next_u64(),
-			secp::random_secret(),
-			secp::random_secret(),
-			secp::random_secret(),
+			thread_rng().next_u64(),
+			random_secret(),
+			random_secret(),
+			random_secret(),
 			None,
 			None,
 		)
@@ -153,8 +154,8 @@ pub mod test_util {
 		let rp = secp.bullet_proof(
 			out_value,
 			blind.clone(),
-			secp::random_secret(),
-			secp::random_secret(),
+			random_secret(),
+			random_secret(),
 			None,
 			None,
 		);

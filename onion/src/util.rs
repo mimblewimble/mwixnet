@@ -19,10 +19,10 @@ use grin_core::ser::{self, Readable, Reader, Writeable, Writer};
 /// # Example
 ///
 /// ```
-/// let mut writer = vec![];
+/// let mut buf = vec![];
 /// let optional_value: Option<u32> = Some(10);
-/// write_optional(&mut writer, &optional_value);
-/// assert_eq!(buf, &[1, 0, 0, 0, 10]);
+/// grin_onion::util::write_optional(&mut grin_core::ser::BinWriter::default(&mut buf), &optional_value).unwrap();
+/// assert_eq!(&buf, &[1, 0, 0, 0, 10]);
 /// ```
 pub fn write_optional<O: Writeable, W: Writer>(
 	writer: &mut W,
@@ -58,8 +58,8 @@ pub fn write_optional<O: Writeable, W: Writer>(
 ///
 /// ```
 /// let mut buf: &[u8] = &[1, 0, 0, 0, 10];
-/// let mut reader = BinReader::new(&mut buf, ProtocolVersion::local(), DeserializationMode::default());
-/// let optional_value: Option<u32> = read_optional(&mut reader).unwrap();
+/// let mut reader = grin_core::ser::BinReader::new(&mut buf, grin_core::ser::ProtocolVersion::local(), grin_core::ser::DeserializationMode::default());
+/// let optional_value: Option<u32> = grin_onion::util::read_optional(&mut reader).unwrap();
 /// assert_eq!(optional_value, Some(10));
 /// ```
 pub fn read_optional<O: Readable, R: Reader>(reader: &mut R) -> Result<Option<O>, ser::Error> {
@@ -87,7 +87,7 @@ pub fn read_optional<O: Readable, R: Reader>(reader: &mut R) -> Result<Option<O>
 ///
 /// ```
 /// let v = vec![0, 1, 2, 3, 4, 5];
-/// let a = vec_to_array::<4>(&v).unwrap();
+/// let a = grin_onion::util::vec_to_array::<4>(&v).unwrap();
 /// assert_eq!(a, [0, 1, 2, 3]);
 /// ```
 pub fn vec_to_array<const S: usize>(vec: &Vec<u8>) -> Result<[u8; S], ser::Error> {

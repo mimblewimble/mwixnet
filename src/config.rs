@@ -1,19 +1,20 @@
-use crate::crypto::dalek::DalekPublicKey;
-use crate::crypto::secp::SecretKey;
-
 use core::num::NonZeroU32;
-use grin_core::global::ChainTypes;
-use grin_util::{file, ToHex, ZeroingString};
-use grin_wallet_util::OnionV3Address;
-use rand::{thread_rng, Rng};
-use ring::{aead, pbkdf2};
-use serde_derive::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::prelude::*;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::result::Result;
+
+use grin_core::global::ChainTypes;
+use grin_util::{file, ToHex, ZeroingString};
+use grin_wallet_util::OnionV3Address;
+use rand::{Rng, thread_rng};
+use ring::{aead, pbkdf2};
+use serde_derive::{Deserialize, Serialize};
 use thiserror::Error;
+
+use grin_onion::crypto::dalek::DalekPublicKey;
+use grin_onion::crypto::secp::SecretKey;
 
 const GRIN_HOME: &str = ".grin";
 const NODE_API_SECRET_FILE_NAME: &str = ".api_secret";
@@ -28,8 +29,6 @@ pub struct ServerConfig {
 	pub interval_s: u32,
 	/// socket address the server listener should bind to
 	pub addr: SocketAddr,
-	/// socket address the tor sender should bind to
-	pub socks_proxy_addr: SocketAddr,
 	/// foreign api address of the grin node
 	pub grin_node_url: SocketAddr,
 	/// path to file containing api secret for the grin node
@@ -39,10 +38,10 @@ pub struct ServerConfig {
 	/// path to file containing secret for the grin wallet's owner api
 	pub wallet_owner_secret_path: Option<String>,
 	/// public key of the previous mix/swap server (e.g. N_1 if this is N_2)
-	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	pub prev_server: Option<DalekPublicKey>,
 	/// public key of the next mix server
-	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	pub next_server: Option<DalekPublicKey>,
 }
 
@@ -181,14 +180,13 @@ struct RawConfig {
 	nonce: String,
 	interval_s: u32,
 	addr: SocketAddr,
-	socks_proxy_addr: SocketAddr,
 	grin_node_url: SocketAddr,
 	grin_node_secret_path: Option<String>,
 	wallet_owner_url: SocketAddr,
 	wallet_owner_secret_path: Option<String>,
-	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	prev_server: Option<DalekPublicKey>,
-	#[serde(with = "crate::crypto::dalek::option_dalek_pubkey_serde", default)]
+	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	next_server: Option<DalekPublicKey>,
 }
 
@@ -206,7 +204,6 @@ pub fn write_config(
 		nonce: encrypted.nonce,
 		interval_s: server_config.interval_s,
 		addr: server_config.addr,
-		socks_proxy_addr: server_config.socks_proxy_addr,
 		grin_node_url: server_config.grin_node_url,
 		grin_node_secret_path: server_config.grin_node_secret_path.clone(),
 		wallet_owner_url: server_config.wallet_owner_url,
@@ -243,7 +240,6 @@ pub fn load_config(
 		key: secret_key,
 		interval_s: raw_config.interval_s,
 		addr: raw_config.addr,
-		socks_proxy_addr: raw_config.socks_proxy_addr,
 		grin_node_url: raw_config.grin_node_url,
 		grin_node_secret_path: raw_config.grin_node_secret_path,
 		wallet_owner_url: raw_config.wallet_owner_url,
@@ -254,10 +250,7 @@ pub fn load_config(
 }
 
 pub fn get_grin_path(chain_type: &ChainTypes) -> PathBuf {
-	let mut grin_path = match dirs::home_dir() {
-		Some(p) => p,
-		None => PathBuf::new(),
-	};
+	let mut grin_path = dirs::home_dir().unwrap_or_else(|| PathBuf::new());
 	grin_path.push(GRIN_HOME);
 	grin_path.push(chain_type.shortname());
 	grin_path
@@ -289,9 +282,12 @@ pub fn wallet_owner_url(_chain_type: &ChainTypes) -> SocketAddr {
 
 #[cfg(test)]
 pub mod test_util {
-	use crate::{DalekPublicKey, ServerConfig};
-	use secp256k1zkp::SecretKey;
 	use std::net::TcpListener;
+
+	use grin_onion::crypto::dalek::DalekPublicKey;
+	use secp256k1zkp::SecretKey;
+
+	use crate::config::ServerConfig;
 
 	pub fn local_config(
 		server_key: &SecretKey,
@@ -302,7 +298,6 @@ pub mod test_util {
 			key: server_key.clone(),
 			interval_s: 1,
 			addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
-			socks_proxy_addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
 			grin_node_url: "127.0.0.1:3413".parse()?,
 			grin_node_secret_path: None,
 			wallet_owner_url: "127.0.0.1:3420".parse()?,
@@ -316,8 +311,9 @@ pub mod test_util {
 
 #[cfg(test)]
 mod tests {
+	use grin_onion::crypto::secp;
+
 	use super::*;
-	use crate::crypto::secp;
 
 	#[test]
 	fn server_key_encrypt() {

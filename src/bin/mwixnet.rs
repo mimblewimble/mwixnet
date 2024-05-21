@@ -1,33 +1,30 @@
-use config::ServerConfig;
-use node::HttpGrinNode;
-use store::SwapStore;
-use wallet::HttpWallet;
-
-use crate::client::{MixClient, MixClientImpl};
-use crate::node::GrinNode;
-use crate::store::StoreError;
-use clap::App;
-use grin_core::global;
-use grin_core::global::ChainTypes;
-use grin_onion::crypto;
-use grin_onion::crypto::dalek::DalekPublicKey;
-use grin_util::{StopState, ZeroingString};
-use rpassword;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::runtime::Runtime;
-
 #[macro_use]
 extern crate clap;
 
-mod client;
-mod config;
-mod node;
-mod servers;
-mod store;
-mod tor;
-mod tx;
-mod wallet;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread::{sleep, spawn};
+use std::time::Duration;
+
+use clap::App;
+use grin_core::global;
+use grin_core::global::ChainTypes;
+use grin_util::{StopState, ZeroingString};
+use rand::{Rng, thread_rng};
+use rpassword;
+use tor_rtcompat::PreferredRuntime;
+
+use grin_onion::crypto;
+use grin_onion::crypto::dalek::DalekPublicKey;
+use mwixnet::config::{self, ServerConfig};
+use mwixnet::mix_client::{MixClient, MixClientImpl};
+use mwixnet::node::GrinNode;
+use mwixnet::node::HttpGrinNode;
+use mwixnet::servers;
+use mwixnet::store::StoreError;
+use mwixnet::store::SwapStore;
+use mwixnet::tor;
+use mwixnet::wallet::HttpWallet;
 
 const DEFAULT_INTERVAL: u32 = 12 * 60 * 60;
 
@@ -37,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {
-	let yml = load_yaml!("../mwixnet.yml");
+	let yml = load_yaml!("mwixnet.yml");
 	let args = App::from_yaml(yml).get_matches();
 	let chain_type = if args.is_present("testnet") {
 		ChainTypes::Testnet
@@ -59,7 +56,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		.value_of("round_time")
 		.map(|t| t.parse::<u32>().unwrap());
 	let bind_addr = args.value_of("bind_addr");
-	let socks_addr = args.value_of("socks_addr");
 	let grin_node_url = args.value_of("grin_node_url");
 	let grin_node_secret_path = args.value_of("grin_node_secret_path");
 	let wallet_owner_url = args.value_of("wallet_owner_url");
@@ -84,7 +80,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			key: crypto::secp::random_secret(),
 			interval_s: round_time.unwrap_or(DEFAULT_INTERVAL),
 			addr: bind_addr.unwrap_or("127.0.0.1:3000").parse()?,
-			socks_proxy_addr: socks_addr.unwrap_or("127.0.0.1:3001").parse()?,
 			grin_node_url: match grin_node_url {
 				Some(u) => u.parse()?,
 				None => config::grin_node_url(&chain_type),
@@ -146,11 +141,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		server_config.addr = bind_addr.parse()?;
 	}
 
-	// Override socks_addr, if supplied
-	if let Some(socks_addr) = socks_addr {
-		server_config.socks_proxy_addr = socks_addr.parse()?;
-	}
-
 	// Override prev_server, if supplied
 	if let Some(prev_server) = prev_server {
 		server_config.prev_server = Some(prev_server);
@@ -168,18 +158,21 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	);
 
 	// Node API health check
-	if let Err(e) = node.get_chain_height() {
+	let rt = tokio::runtime::Builder::new_multi_thread()
+		.enable_all()
+		.build()?;
+	if let Err(e) = rt.block_on(node.async_get_chain_tip()) {
 		eprintln!("Node communication failure. Is node listening?");
 		return Err(e.into());
 	};
 
 	// Open wallet
 	let wallet_pass = prompt_wallet_password(&args.value_of("wallet_pass"));
-	let wallet = HttpWallet::open_wallet(
+	let wallet = rt.block_on(HttpWallet::async_open_wallet(
 		&server_config.wallet_owner_url,
 		&server_config.wallet_owner_api_secret(),
 		&wallet_pass,
-	);
+	));
 	let wallet = match wallet {
 		Ok(w) => w,
 		Err(e) => {
@@ -188,21 +181,29 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		}
 	};
 
-	let mut tor_process = tor::init_tor_listener(&server_config)?;
+	let tor_instance = rt.block_on(tor::async_init_tor(
+		PreferredRuntime::current().unwrap(),
+		&config::get_grin_path(&chain_type).to_str().unwrap(),
+		&server_config,
+	))?;
+	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
+	let tor_clone = tor_instance.clone();
 
 	let stop_state = Arc::new(StopState::new());
 	let stop_state_clone = stop_state.clone();
 
-	let rt = Runtime::new()?;
 	rt.spawn(async move {
 		futures::executor::block_on(build_signals_fut());
-		let _ = tor_process.kill();
+		tor_clone.lock().stop();
 		stop_state_clone.stop();
 	});
 
 	let next_mixer: Option<Arc<dyn MixClient>> = server_config.next_server.clone().map(|pk| {
-		let client: Arc<dyn MixClient> =
-			Arc::new(MixClientImpl::new(server_config.clone(), pk.clone()));
+		let client: Arc<dyn MixClient> = Arc::new(MixClientImpl::new(
+			server_config.clone(),
+			tor_instance.clone(),
+			pk.clone(),
+		));
 		client
 	});
 
@@ -213,13 +214,26 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			server_config.server_pubkey().to_hex()
 		);
 
-		servers::mix_rpc::listen(
+		let (_, http_server) = servers::mix_rpc::listen(
+			rt.handle(),
 			server_config,
 			next_mixer,
 			Arc::new(wallet),
 			Arc::new(node),
-			stop_state,
-		)
+		)?;
+
+		let close_handle = http_server.close_handle();
+		let round_handle = spawn(move || loop {
+			if stop_state.is_stopped() {
+				close_handle.close();
+				break;
+			}
+
+			sleep(Duration::from_millis(100));
+		});
+
+		http_server.wait();
+		round_handle.join().unwrap();
 	} else {
 		println!(
 			"Starting SWAP server with public key {:?}",
@@ -237,15 +251,75 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		)?;
 
 		// Start the mwixnet JSON-RPC HTTP 'swap' server
-		servers::swap_rpc::listen(
-			server_config,
+		let (swap_server, http_server) = servers::swap_rpc::listen(
+			rt.handle(),
+			&server_config,
 			next_mixer,
 			Arc::new(wallet),
 			Arc::new(node),
 			store,
-			stop_state,
-		)
+		)?;
+
+		let close_handle = http_server.close_handle();
+		let round_handle = spawn(move || {
+			let mut rng = thread_rng();
+			let mut secs = 0u32;
+			let mut reorg_secs = 0u32;
+			let mut reorg_window = rng.gen_range(900u32, 3600u32);
+			let prev_tx = Arc::new(Mutex::new(None));
+			let server = swap_server.clone();
+
+			loop {
+				if stop_state.is_stopped() {
+					close_handle.close();
+					break;
+				}
+
+				sleep(Duration::from_secs(1));
+				secs = (secs + 1) % server_config.interval_s;
+				reorg_secs = (reorg_secs + 1) % reorg_window;
+
+				if secs == 0 {
+					let prev_tx_clone = prev_tx.clone();
+					let server_clone = server.clone();
+					rt.spawn(async move {
+						let result = server_clone.lock().await.execute_round().await;
+						let mut prev_tx_lock = prev_tx_clone.lock().unwrap();
+						*prev_tx_lock = match result {
+							Ok(Some(tx)) => Some(tx),
+							_ => None,
+						};
+					});
+					reorg_secs = 0;
+					reorg_window = rng.gen_range(900u32, 3600u32);
+				} else if reorg_secs == 0 {
+					let prev_tx_clone = prev_tx.clone();
+					let server_clone = server.clone();
+					rt.spawn(async move {
+						let tx_option = {
+							let prev_tx_lock = prev_tx_clone.lock().unwrap();
+							prev_tx_lock.clone()
+						}; // Lock is dropped here
+
+						if let Some(tx) = tx_option {
+							let result = server_clone.lock().await.check_reorg(&tx).await;
+							let mut prev_tx_lock = prev_tx_clone.lock().unwrap();
+							*prev_tx_lock = match result {
+								Ok(Some(tx)) => Some(tx),
+								_ => None,
+							};
+						}
+					});
+					reorg_window = rng.gen_range(900u32, 3600u32);
+				}
+			}
+		});
+
+		http_server.wait();
+		round_handle.join().unwrap();
 	}
+
+	Ok(())
 }
 
 #[cfg(unix)]
