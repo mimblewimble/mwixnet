@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 
 use async_trait::async_trait;
 use grin_core::core::Output;
@@ -54,11 +55,13 @@ pub struct ECDHPubkey {
 impl HttpWallet {
 	/// Calls the 'open_wallet' using the RPC API.
 	pub async fn async_open_wallet(
-		wallet_owner_url: &SocketAddr,
+		wallet_owner_url: &str,
 		wallet_owner_secret: &Option<String>,
 		wallet_pass: &ZeroingString,
 	) -> Result<HttpWallet, WalletError> {
 		info!("Opening wallet at {}", wallet_owner_url);
+		let mut addrs_iter = wallet_owner_url.to_socket_addrs().unwrap();
+		let wallet_owner_url = addrs_iter.next().unwrap();
 		let shared_key =
 			HttpWallet::async_init_secure_api(&wallet_owner_url, &wallet_owner_secret).await?;
 		let open_wallet_params = json!({

@@ -30,11 +30,11 @@ pub struct ServerConfig {
 	/// socket address the server listener should bind to
 	pub addr: SocketAddr,
 	/// foreign api address of the grin node
-	pub grin_node_url: SocketAddr,
+	pub grin_node_url: String,
 	/// path to file containing api secret for the grin node
 	pub grin_node_secret_path: Option<String>,
 	/// owner api address of the grin wallet
-	pub wallet_owner_url: SocketAddr,
+	pub wallet_owner_url: String,
 	/// path to file containing secret for the grin wallet's owner api
 	pub wallet_owner_secret_path: Option<String>,
 	/// public key of the previous mix/swap server (e.g. N_1 if this is N_2)
@@ -180,9 +180,9 @@ struct RawConfig {
 	nonce: String,
 	interval_s: u32,
 	addr: SocketAddr,
-	grin_node_url: SocketAddr,
+	grin_node_url: String,
 	grin_node_secret_path: Option<String>,
-	wallet_owner_url: SocketAddr,
+	wallet_owner_url: String,
 	wallet_owner_secret_path: Option<String>,
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	prev_server: Option<DalekPublicKey>,
@@ -204,9 +204,9 @@ pub fn write_config(
 		nonce: encrypted.nonce,
 		interval_s: server_config.interval_s,
 		addr: server_config.addr,
-		grin_node_url: server_config.grin_node_url,
+		grin_node_url: server_config.grin_node_url.clone(),
 		grin_node_secret_path: server_config.grin_node_secret_path.clone(),
-		wallet_owner_url: server_config.wallet_owner_url,
+		wallet_owner_url: server_config.wallet_owner_url.clone(),
 		wallet_owner_secret_path: server_config.wallet_owner_secret_path.clone(),
 		prev_server: server_config.prev_server.clone(),
 		next_server: server_config.next_server.clone(),
@@ -268,16 +268,16 @@ pub fn wallet_owner_secret_path(chain_type: &ChainTypes) -> PathBuf {
 	path
 }
 
-pub fn grin_node_url(chain_type: &ChainTypes) -> SocketAddr {
+pub fn grin_node_url(chain_type: &ChainTypes) -> String {
 	if *chain_type == ChainTypes::Testnet {
-		"127.0.0.1:13413".parse().unwrap()
+		"127.0.0.1:13413".into()
 	} else {
-		"127.0.0.1:3413".parse().unwrap()
+		"127.0.0.1:3413".into()
 	}
 }
 
-pub fn wallet_owner_url(_chain_type: &ChainTypes) -> SocketAddr {
-	"127.0.0.1:3420".parse().unwrap()
+pub fn wallet_owner_url(_chain_type: &ChainTypes) -> String {
+	"127.0.0.1:3420".into()
 }
 
 #[cfg(test)]

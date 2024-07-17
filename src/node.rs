@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -142,9 +143,11 @@ pub struct HttpGrinNode {
 const ENDPOINT: &str = "/v2/foreign";
 
 impl HttpGrinNode {
-	pub fn new(node_url: &SocketAddr, node_api_secret: &Option<String>) -> HttpGrinNode {
+	pub fn new(node_url: &str, node_api_secret: &Option<String>) -> HttpGrinNode {
+		let mut addrs_iter = node_url.to_socket_addrs().unwrap();
+		let node_url = addrs_iter.next().unwrap();
 		HttpGrinNode {
-			node_url: node_url.to_owned(),
+			node_url,
 			node_api_secret: node_api_secret.to_owned(),
 		}
 	}
