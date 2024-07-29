@@ -63,9 +63,9 @@ where
 			.unwrap()
 			.local_addr()
 			.unwrap(),
-		grin_node_url: node.lock().api_address(),
+		grin_node_url: node.lock().api_address().to_string(),
 		grin_node_secret_path: None,
-		wallet_owner_url: wallet.lock().owner_address(),
+		wallet_owner_url: wallet.lock().owner_address().to_string(),
 		wallet_owner_secret_path: None,
 		prev_server: None,
 		next_server: match next_server {
@@ -128,9 +128,9 @@ where
 			.unwrap()
 			.local_addr()
 			.unwrap(),
-		grin_node_url: node.lock().api_address(),
+		grin_node_url: node.lock().api_address().to_string(),
 		grin_node_secret_path: None,
-		wallet_owner_url: wallet.lock().owner_address(),
+		wallet_owner_url: wallet.lock().owner_address().to_string(),
 		wallet_owner_secret_path: None,
 		prev_server: Some(prev_server),
 		next_server: match next_server {

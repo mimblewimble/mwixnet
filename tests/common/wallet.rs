@@ -108,7 +108,7 @@ impl IntegrationGrinWallet {
 		let owner_api = Arc::new(Owner::new(wallet.clone(), None));
 
 		let address_str = format!("127.0.0.1:{}", api_listen_port);
-		let owner_addr: SocketAddr = address_str.parse().unwrap();
+		let address_str_2 = format!("127.0.0.1:{}", api_listen_port);
 		let thr_wallet = wallet.clone();
 		let _thread_handle = thread::spawn(move || {
 			controller::owner_listener(
@@ -125,7 +125,7 @@ impl IntegrationGrinWallet {
 		});
 
 		let http_client = Arc::new(
-			HttpWallet::async_open_wallet(&owner_addr, &None, &ZeroingString::from("pass"))
+			HttpWallet::async_open_wallet(&address_str_2, &None, &ZeroingString::from("pass"))
 				.await
 				.unwrap(),
 		);
