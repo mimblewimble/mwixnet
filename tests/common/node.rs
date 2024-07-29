@@ -70,7 +70,7 @@ impl IntegrationGrinNode {
 	}
 
 	pub fn to_client(&self) -> Arc<dyn GrinNode> {
-		Arc::new(HttpGrinNode::new(&self.api_address(), &None))
+		Arc::new(HttpGrinNode::new(&self.api_address().to_string(), &None))
 	}
 }
 

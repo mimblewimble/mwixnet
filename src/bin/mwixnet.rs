@@ -161,14 +161,17 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let rt = tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
 		.build()?;
-	if let Err(e) = rt.block_on(node.async_get_chain_tip()) {
+
+	let rt_handle = rt.handle().clone();
+
+	if let Err(e) = rt_handle.block_on(node.async_get_chain_tip()) {
 		eprintln!("Node communication failure. Is node listening?");
 		return Err(e.into());
 	};
 
 	// Open wallet
 	let wallet_pass = prompt_wallet_password(&args.value_of("wallet_pass"));
-	let wallet = rt.block_on(HttpWallet::async_open_wallet(
+	let wallet = rt_handle.block_on(HttpWallet::async_open_wallet(
 		&server_config.wallet_owner_url,
 		&server_config.wallet_owner_api_secret(),
 		&wallet_pass,
@@ -181,8 +184,14 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		}
 	};
 
-	let tor_instance = rt.block_on(tor::async_init_tor(
-		PreferredRuntime::current().unwrap(),
+	let tor_runtime = if let Ok(r) = PreferredRuntime::create() {
+		r
+	} else {
+		return Err("No runtime found".into());
+	};
+
+	let tor_instance = rt_handle.block_on(tor::async_init_tor(
+		tor_runtime,
 		&config::get_grin_path(&chain_type).to_str().unwrap(),
 		&server_config,
 	))?;
@@ -192,7 +201,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let stop_state = Arc::new(StopState::new());
 	let stop_state_clone = stop_state.clone();
 
-	rt.spawn(async move {
+	rt_handle.spawn(async move {
 		futures::executor::block_on(build_signals_fut());
 		tor_clone.lock().stop();
 		stop_state_clone.stop();
@@ -215,7 +224,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		);
 
 		let (_, http_server) = servers::mix_rpc::listen(
-			rt.handle(),
+			&rt_handle,
 			server_config,
 			next_mixer,
 			Arc::new(wallet),
