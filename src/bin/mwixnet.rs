@@ -116,6 +116,18 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let password = prompt_password();
 	let mut server_config = config::load_config(&config_path, &password)?;
 
+	// Write a new config file if init-config command is supplied
+	if let ("address", Some(_)) = args.subcommand() {
+		if !config_path.exists() {
+			panic!(
+				"No public address configured (Config file not found). {}",
+				config_path.to_string_lossy()
+			);
+		}
+		println!("{}", server_config.onion_address());
+		return Ok(())
+	}
+
 	// Override grin_node_url, if supplied
 	if let Some(grin_node_url) = grin_node_url {
 		server_config.grin_node_url = grin_node_url.parse()?;

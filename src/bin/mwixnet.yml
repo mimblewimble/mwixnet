@@ -49,3 +49,5 @@ args:
 subcommands:
   - init-config:
       about: Writes a new configuration file
+  - address:
+      about: Displays the public key of the server
