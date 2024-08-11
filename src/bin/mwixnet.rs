@@ -124,7 +124,17 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 				config_path.to_string_lossy()
 			);
 		}
-		println!("{}", server_config.onion_address());
+		let sub_args = args.subcommand_matches("address").unwrap();
+		if sub_args.is_present("output_file") 
+		{
+			//output onion address to file
+			let output_file = sub_args.value_of("output_file").unwrap();
+			let onion_address = server_config.onion_address();
+			std::fs::write(output_file, format!("{}", onion_address))?;
+			println!("Onion address written to file: {}", output_file);
+		} else {
+			println!("{}", server_config.onion_address());
+		}
 		return Ok(())
 	}
 
