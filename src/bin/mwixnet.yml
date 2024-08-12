@@ -49,3 +49,12 @@ args:
 subcommands:
   - init-config:
       about: Writes a new configuration file
+  - address:
+      about: Outputs the public key of the server
+      args:
+        - output_file:
+            help: Path to output the public key to
+            long: output_file
+            short: o
+            takes_value: true   
+            required: false
