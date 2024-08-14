@@ -124,7 +124,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 				config_path.to_string_lossy()
 			);
 		}
-		let sub_args = args.subcommand_matches("address").unwrap();
+		let sub_args = args.subcommand_matches("pubkey").unwrap();
 		let server_pubkey = server_config.server_pubkey();
 		if sub_args.is_present("output_file") 
 		{
