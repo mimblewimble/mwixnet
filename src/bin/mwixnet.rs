@@ -117,7 +117,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let mut server_config = config::load_config(&config_path, &password)?;
 
 	// Write a new config file if init-config command is supplied
-	if let ("address", Some(_)) = args.subcommand() {
+	if let ("pubkey", Some(_)) = args.subcommand() {
 		if !config_path.exists() {
 			panic!(
 				"No public address configured (Config file not found). {}",
@@ -125,15 +125,15 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			);
 		}
 		let sub_args = args.subcommand_matches("address").unwrap();
+		let server_pubkey = server_config.server_pubkey();
 		if sub_args.is_present("output_file") 
 		{
-			//output onion address to file
+			//output server pubkey to file
 			let output_file = sub_args.value_of("output_file").unwrap();
-			let onion_address = server_config.onion_address();
-			std::fs::write(output_file, format!("{}", onion_address))?;
-			println!("Onion address written to file: {}", output_file);
+			std::fs::write(output_file, format!("{}", server_pubkey.to_hex()))?;
+			println!("Server pubkey written to file: {}", output_file);
 		} else {
-			println!("{}", server_config.onion_address());
+			println!("{}", server_pubkey.to_hex());
 		}
 		return Ok(())
 	}
