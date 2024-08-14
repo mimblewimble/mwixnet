@@ -49,7 +49,7 @@ args:
 subcommands:
   - init-config:
       about: Writes a new configuration file
-  - address:
+  - pubkey:
       about: Outputs the public key of the server
       args:
         - output_file:
