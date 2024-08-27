@@ -12,6 +12,7 @@ use grin_util::ToHex;
 use serde_json::json;
 use thiserror::Error;
 
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::secp::Commitment;
 
 use crate::http;

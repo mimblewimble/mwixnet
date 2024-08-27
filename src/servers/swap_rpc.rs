@@ -6,6 +6,7 @@ use jsonrpc_derive::rpc;
 use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
 use serde::{Deserialize, Serialize};
 
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::comsig::{self, ComSignature};
 use grin_onion::onion::Onion;
 

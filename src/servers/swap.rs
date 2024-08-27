@@ -9,6 +9,7 @@ use itertools::Itertools;
 use secp256k1zkp::key::ZERO_KEY;
 use thiserror::Error;
 
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::comsig::ComSignature;
 use grin_onion::crypto::secp::{Commitment, Secp256k1, SecretKey};
 use grin_onion::onion::{Onion, OnionError};

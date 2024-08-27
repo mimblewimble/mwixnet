@@ -4,6 +4,7 @@ use grin_core::core::{
 	FeeFields, Input, Inputs, KernelFeatures, Output, Transaction, TransactionBody, TxKernel,
 };
 use grin_keychain::BlindingFactor;
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::secp;
 use secp256k1zkp::{ContextFlag, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};

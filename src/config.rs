@@ -12,6 +12,7 @@ use rand::{Rng, thread_rng};
 use ring::{aead, pbkdf2};
 use serde_derive::{Deserialize, Serialize};
 use thiserror::Error;
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
 use grin_onion::crypto::dalek::DalekPublicKey;
 use grin_onion::crypto::secp::SecretKey;
