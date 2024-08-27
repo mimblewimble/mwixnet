@@ -5,9 +5,6 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[workspace]
-members = ["onion"]
-
 [dependencies]
 arti-client = { version = "0.18.0", default-features = false, features = ["async-std", "rustls", "onion-service-client", "onion-service-service"] }
 arti-hyper = "0.18.0"
@@ -56,20 +53,21 @@ tor-llcrypto = "0.18.0"
 tor-keymgr = "0.18.0"
 tor-rtcompat = "0.18.0"
 x25519-dalek = "0.6.0"
-grin_onion = { path = "./onion" }
-grin_secp256k1zkp = { version = "0.7.14", features = ["bullet-proof-sizing"] }
-grin_api = "5.3.1"
-grin_core = "5.3.1"
-grin_chain = "5.3.1"
-grin_keychain = "5.3.1"
-grin_p2p = "5.3.1"
-grin_servers = "5.3.1"
-grin_store = "5.3.1"
-grin_util = "5.3.1"
-grin_wallet_api = "5.3.1"
-grin_wallet_config = "5.3.1"
-grin_wallet_controller = "5.3.1"
-grin_wallet_impls = "5.3.1"
-grin_wallet_libwallet = "5.3.1"
-grin_wallet_util = "5.3.1"
 log = "0.4.20"
+
+# Bleeding Edge Grin Deps
+grin_secp256k1zkp = { version = "0.7.14", features = ["bullet-proof-sizing"] }
+grin_api = { git = "https://github.com/mimblewimble/grin", branch = "master" }
+grin_core = { git = "https://github.com/mimblewimble/grin", branch = "master" }
+grin_chain = { git = "https://github.com/mimblewimble/grin", branch = "master" }
+grin_keychain = { git = "https://github.com/mimblewimble/grin", branch = "master" }
+grin_p2p = { git = "https://github.com/mimblewimble/grin", branch = "master" }
+grin_servers = { git = "https://github.com/mimblewimble/grin", branch = "master" }
+grin_store = { git = "https://github.com/mimblewimble/grin", branch = "master" }
+grin_util = { git = "https://github.com/mimblewimble/grin", branch = "master" }
+grin_wallet_api = { git = "https://github.com/mimblewimble/grin-wallet", branch = "contracts" }
+grin_wallet_config = { git = "https://github.com/mimblewimble/grin-wallet", branch = "contracts" }
+grin_wallet_controller = { git = "https://github.com/mimblewimble/grin-wallet", branch = "contracts" }
+grin_wallet_impls = { git = "https://github.com/mimblewimble/grin-wallet", branch = "contracts" }
+grin_wallet_libwallet = { git = "https://github.com/mimblewimble/grin-wallet", branch = "contracts" }
+grin_wallet_util = { git = "https://github.com/mimblewimble/grin-wallet", branch = "contracts" }
