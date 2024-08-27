@@ -10,6 +10,7 @@ use grin_core::ser::ProtocolVersion;
 use itertools::Itertools;
 use thiserror::Error;
 
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::dalek::{self, DalekSignature};
 use grin_onion::onion::{Onion, OnionError, PeeledOnion};
 use secp256k1zkp::key::ZERO_KEY;

@@ -10,6 +10,7 @@ use clap::App;
 use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_util::{StopState, ZeroingString};
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use rand::{Rng, thread_rng};
 use rpassword;
 use tor_rtcompat::PreferredRuntime;

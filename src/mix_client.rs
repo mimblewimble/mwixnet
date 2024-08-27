@@ -10,6 +10,7 @@ use serde_json::json;
 use thiserror::Error;
 use tor_rtcompat::Runtime;
 
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::dalek::{self, DalekPublicKey};
 use grin_onion::onion::Onion;
 

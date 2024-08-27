@@ -6,6 +6,7 @@ use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
 use jsonrpc_http_server::jsonrpc_core::{self, BoxFuture, IoHandler};
 use serde::{Deserialize, Serialize};
 
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::dalek::{self, DalekSignature};
 use grin_onion::onion::Onion;
 

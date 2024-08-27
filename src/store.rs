@@ -7,6 +7,7 @@ use grin_store::{self as store, Store};
 use grin_util::ToHex;
 use thiserror::Error;
 
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::secp::{self, Commitment, RangeProof, SecretKey};
 use grin_onion::onion::Onion;
 use grin_onion::util::{read_optional, write_optional};
