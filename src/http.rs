@@ -3,9 +3,9 @@ use std::time::Duration;
 use grin_api::json_rpc;
 use grin_util::to_base64;
 use grin_wallet_api::{EncryptedRequest, EncryptedResponse, JsonId};
-use hyper::body::Body as HyperBody;
-use hyper::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-use hyper::Request;
+use hyper_legacy::body::Body as HyperBody;
+use hyper_legacy::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use hyper_legacy::Request;
 use serde_json::json;
 use thiserror::Error;
 
@@ -17,17 +17,17 @@ pub enum HttpError {
 	#[error("Error decrypting response")]
 	DecryptResponseError(),
 	#[error("Hyper HTTP error: {0:?}")]
-	HyperHttpError(hyper::http::Error),
+	HyperHttpError(hyper_legacy::http::Error),
 	#[error("Hyper request failed with error: {0:?}")]
-	RequestFailed(hyper::Error),
+	RequestFailed(hyper_legacy::Error),
 	#[error("Error with response body: {0:?}")]
-	ResponseBodyError(hyper::Error),
+	ResponseBodyError(hyper_legacy::Error),
 	#[error("Error deserializing JSON response: {0:?}")]
 	ResponseJsonError(serde_json::Error),
 	#[error("Error decoding JSON-RPC response: {0:?}")]
 	ResponseParseError(json_rpc::Error),
 	#[error("Wrong response code: {0}")]
-	ResponseStatusError(hyper::StatusCode),
+	ResponseStatusError(hyper_legacy::StatusCode),
 }
 
 pub async fn async_send_enc_request<D: serde::de::DeserializeOwned>(
@@ -90,14 +90,14 @@ pub fn build_request(
 	api_secret: &Option<String>,
 	req_body: String,
 ) -> Result<Request<HyperBody>, HttpError> {
-	let mut req_builder = hyper::Request::builder();
+	let mut req_builder = hyper_legacy::Request::builder();
 	if let Some(api_secret) = api_secret {
 		let basic_auth = format!("Basic {}", to_base64(&format!("grin:{}", api_secret)));
 		req_builder = req_builder.header(AUTHORIZATION, basic_auth);
 	}
 
 	req_builder
-		.method(hyper::Method::POST)
+		.method(hyper_legacy::Method::POST)
 		.uri(url)
 		.header(USER_AGENT, "grin-client")
 		.header(ACCEPT, "application/json")
@@ -107,9 +107,10 @@ pub fn build_request(
 }
 
 async fn send_request_async(req: Request<HyperBody>) -> Result<String, HttpError> {
-	let client = hyper::Client::builder()
+	let https = hyper_tls::HttpsConnector::new();
+	let client = hyper_legacy::Client::builder()
 		.pool_idle_timeout(Duration::from_secs(30))
-		.build_http();
+		.build::<_, HyperBody>(https);
 
 	let resp = client
 		.request(req)
@@ -119,7 +120,7 @@ async fn send_request_async(req: Request<HyperBody>) -> Result<String, HttpError
 		return Err(HttpError::ResponseStatusError(resp.status()));
 	}
 
-	let raw = hyper::body::to_bytes(resp)
+	let raw = hyper_legacy::body::to_bytes(resp)
 		.await
 		.map_err(HttpError::ResponseBodyError)?;
 

@@ -2,9 +2,9 @@
 
 ## Overview
 
-The `SwapStore` is an lmdb database, responsible for storing unprocessed and in-process `SwapData` entries.
+The `SwapStore` is an LMDB database for swap entries and generated swap transactions.
 
-The `SwapStore` is used to hold onto new `SwapData` entries until the next swap round, when the mixing process actually occurs. At that time, they will be marked as `InProcess` until the swap is in a confirmed transaction, at which time they will be marked `Completed` and eventually erased.
+New entries remain `Unprocessed` until a round uses them. A successful round marks them `InProcess`; entries rejected by a downstream mixer become `Failed`. Reorg checks can rebroadcast or rebuild the transaction. Automatic transition to `Completed` and deletion are not currently implemented.
 
 ## Data Model
 
@@ -22,6 +22,6 @@ The `SwapData` structure contains information needed to swap a single output. It
 - `onion`: The remaining onion after peeling off our layer.
 - `status`: The status of the swap, represented by the `SwapStatus` enum, which can be one of the following:
   - `Unprocessed`: The swap has been received but not yet processed.
-  - `InProcess { kernel_hash: Hash }`: The swap is currently being processed, and is expected to be a transaction with the kernel matching the given `kernel_hash`.
-  - `Completed { kernel_hash: Hash, block_hash: Hash }`: The swap has been successfully processed and included in the block matching the given `block_hash`.
+  - `InProcess { kernel_commit: Commitment }`: The swap was included in a generated transaction identified by its kernel commitment.
+  - `Completed { kernel_commit: Commitment, block_hash: Hash }`: Reserved for a swap confirmed in the given block; the current server does not set this status.
   - `Failed`: The swap has failed, potentially due to expiration or because the output is no longer in the UTXO set.

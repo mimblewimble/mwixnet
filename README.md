@@ -11,7 +11,7 @@ We refer to the remaining servers (N<sub>2</sub>...N<sub>n</sub>) as "Mixers."
 #### init-config
 To setup a new server, run `mwixnet init-config`. Then enter a password for the server key when prompted.
 
-This will generate a key for the server and then create a new config file named `mwixnet-config.toml` in the current working directory.
+This generates a server key and writes `mwixnet-config.toml` to the selected network directory (for example `~/.grin/test` for testnet). Use `--config_file` to choose another path.
 The configuration file will contain the private key of the server encrypted with the server password you provided.
 
 **Back this config file up! It's the only copy of the server's private key!**
@@ -19,8 +19,21 @@ The configuration file will contain the private key of the server encrypted with
 #### Wallet
 A grin-wallet account must be created for receiving extra mwixnet fees. The wallet's owner API should be available (run `grin-wallet owner_api`).
 
+To run without a server wallet, set `collect_fees = false` in the config or pass `--no_fee_collection`. Hop fees are then paid entirely to miners.
+
 ### Usage
-With your wallet and fully synced node both online and listening at the addresses configured, the mwixnet server can be started by running `mwixnet` and providing the server key password and wallet password when prompted.
+With a fully synced node and, when collecting fees, a wallet listening at the configured addresses, start the server by running `mwixnet` and entering the requested passwords.
+
+`mwixnet pubkey` outputs the server's Ed25519 identity key used to configure adjacent servers.
+`mwixnet onion-pubkey` outputs the server's X25519 onion encryption key that clients provide to their wallets when creating mwixnet requests.
+
+#### Wallet workflow
+
+1. Collect each server's X25519 onion key in route order.
+2. Run the wallet's experimental `mwixnet` command with an eligible output commitment, the first server's onion address, `fee_per_hop`, and the ordered server keys.
+3. The wallet creates and locks the request, then submits it to the first server's `/v1` endpoint.
+
+Owner API clients can instead call `create_mwixnet_req` and submit the returned `request` field themselves. The result also contains the associated `tx_id` when locking was requested. Routing between servers is fixed by each server's `prev_server` and `next_server` configuration.
 
 ### SWAP API
 The Swap Server (N<sub>1</sub>) provides the `swap` API, which is publicly available for use by GRIN wallets.
@@ -51,8 +64,8 @@ The Swap Server (N<sub>1</sub>) provides the `swap` API, which is publicly avail
 <ol>
     <li>Choose random x<sub>i</sub> for each node n<sub>i</sub> and create a Payload (P<sub>i</sub>) for each containing x<sub>i</sub></li>
     <li>Build a rangeproof for C<sub>n</sub>=C<sub>in</sub>+(Σx<sub>1...n</sub>)*G and include it in payload P<sub>n</sub></li>
-    <li>Choose random initial ephemeral keypair (r<sub>1</sub>, R<sub>1</sub>)</li>
-    <li>Derive remaining ephemeral keypairs such that r<sub>i+1</sub>=r<sub>i</sub>*Sha256(R<sub>i</sub>||s<sub>i</sub>) where s<sub>i</sub>=ECDH(R<sub>i</sub>, K<sub>i</sub>)</li>
+    <li>Choose a random ephemeral keypair (r<sub>i</sub>, R<sub>i</sub>) for each hop</li>
+    <li>For each hop, derive s<sub>i</sub>=ECDH(r<sub>i</sub>, K<sub>i</sub>) and include R<sub>i+1</sub> in P<sub>i</sub></li>
     <li>For each node n<sub>i</sub>, use ChaCha20 stream cipher with key=HmacSha256("MWIXNET"||s<sub>i</sub>) and nonce "NONCE1234567" to encrypt payloads P<sub>i...n</sub></li>
 </ol>
 

@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,8 +10,8 @@ use grin_util::ToHex;
 use serde_json::json;
 use thiserror::Error;
 
-use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::secp::Commitment;
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
 use crate::http;
 
@@ -137,19 +135,22 @@ pub async fn async_is_tx_valid(
 /// HTTP (JSON-RPC) implementation of the 'GrinNode' trait
 #[derive(Clone)]
 pub struct HttpGrinNode {
-	node_url: SocketAddr,
-	node_api_secret: Option<String>,
+	node_url: String,
+	node_foreign_api_secret: Option<String>,
 }
 
 const ENDPOINT: &str = "/v2/foreign";
 
 impl HttpGrinNode {
-	pub fn new(node_url: &str, node_api_secret: &Option<String>) -> HttpGrinNode {
-		let mut addrs_iter = node_url.to_socket_addrs().unwrap();
-		let node_url = addrs_iter.next().unwrap();
+	pub fn new(node_url: &str, node_foreign_api_secret: &Option<String>) -> HttpGrinNode {
+		let node_url = if node_url.starts_with("http://") || node_url.starts_with("https://") {
+			node_url.trim_end_matches('/').to_owned()
+		} else {
+			format!("http://{}", node_url.trim_end_matches('/'))
+		};
 		HttpGrinNode {
 			node_url,
-			node_api_secret: node_api_secret.to_owned(),
+			node_foreign_api_secret: node_foreign_api_secret.to_owned(),
 		}
 	}
 
@@ -158,10 +159,11 @@ impl HttpGrinNode {
 		method: &str,
 		params: &serde_json::Value,
 	) -> Result<D, NodeError> {
-		let url = format!("http://{}{}", self.node_url, ENDPOINT);
-		let parsed = http::async_send_json_request(&url, &self.node_api_secret, &method, &params)
-			.await
-			.map_err(NodeError::NodeCommError)?;
+		let url = format!("{}{}", self.node_url, ENDPOINT);
+		let parsed =
+			http::async_send_json_request(&url, &self.node_foreign_api_secret, &method, &params)
+				.await
+				.map_err(NodeError::NodeCommError)?;
 		Ok(parsed)
 	}
 }
@@ -227,19 +229,14 @@ impl GrinNode for HttpGrinNode {
 			.async_send_request::<serde_json::Value>("get_kernel", &params)
 			.await?;
 
-		let contents = format!("{:?}", value);
-		if contents.contains("NotFound") {
-			return Ok(None);
-		}
-
-		let located_kernel = serde_json::from_value::<LocatedTxKernel>(value)
-			.map_err(NodeError::DecodeResponseError)?;
-		Ok(Some(located_kernel))
+		serde_json::from_value::<Option<LocatedTxKernel>>(value)
+			.map_err(NodeError::DecodeResponseError)
 	}
 }
 
 #[cfg(test)]
 pub mod mock {
+	use super::grin_onion;
 	use std::collections::HashMap;
 	use std::sync::RwLock;
 
@@ -346,5 +343,26 @@ pub mod mock {
 
 			Ok(None)
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::HttpGrinNode;
+
+	#[test]
+	fn node_url_supports_http_and_https() {
+		assert_eq!(
+			HttpGrinNode::new("127.0.0.1:13413", &None).node_url,
+			"http://127.0.0.1:13413"
+		);
+		assert_eq!(
+			HttpGrinNode::new("http://node-test:13413/", &None).node_url,
+			"http://node-test:13413"
+		);
+		assert_eq!(
+			HttpGrinNode::new("https://testnet.grinffindor.org/", &None).node_url,
+			"https://testnet.grinffindor.org"
+		);
 	}
 }

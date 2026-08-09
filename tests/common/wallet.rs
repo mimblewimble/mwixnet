@@ -1,29 +1,26 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
-use grin_core::core::{FeeFields, Output, OutputFeatures, Transaction, TxKernel};
+use grin_core::core::{Output, Transaction, TxKernel};
 use grin_core::global::ChainTypes;
-use grin_core::libtx::tx_fee;
-use grin_keychain::{BlindingFactor, ExtKeychain, Identifier, Keychain, SwitchCommitmentType};
-use grin_util::{Mutex, ZeroingString};
+use grin_keychain::{ExtKeychain, Identifier};
+use grin_util::{Mutex, ToHex, ZeroingString};
 use grin_wallet_api::Owner;
 use grin_wallet_config::WalletConfig;
 use grin_wallet_controller::controller;
 use grin_wallet_impls::{DefaultLCProvider, DefaultWalletImpl, HTTPNodeClient};
+use grin_wallet_libwallet::mwixnet::{MwixnetReqCreationResult, MwixnetServerPublicKey};
 use grin_wallet_libwallet::{InitTxArgs, Slate, VersionedSlate, WalletInfo, WalletInst};
 use log::error;
-use serde_derive::{Deserialize, Serialize};
-use serde_json::json;
-use x25519_dalek::PublicKey as xPublicKey;
-
-use grin_onion::crypto::comsig::ComSignature;
-use grin_onion::onion::Onion;
-use grin_onion::Hop;
 use mwixnet::http;
 use mwixnet::wallet::HttpWallet;
 use secp256k1zkp::pedersen::Commitment;
-use secp256k1zkp::{Secp256k1, SecretKey};
+use secp256k1zkp::SecretKey;
+use serde_derive::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::common::types::BlockFees;
 
@@ -39,22 +36,9 @@ pub struct CbData {
 }
 
 pub struct IntegrationGrinWallet {
-	wallet: Arc<
-		Mutex<
-			Box<
-				dyn WalletInst<
-					'static,
-					DefaultLCProvider<'static, HTTPNodeClient, ExtKeychain>,
-					HTTPNodeClient,
-					ExtKeychain,
-				>,
-			>,
-		>,
-	>,
 	api_listen_port: u16,
-	owner_api: Arc<
-		Owner<DefaultLCProvider<'static, HTTPNodeClient, ExtKeychain>, HTTPNodeClient, ExtKeychain>,
-	>,
+	owner_api:
+		Arc<Owner<DefaultLCProvider<HTTPNodeClient, ExtKeychain>, HTTPNodeClient, ExtKeychain>>,
 	http_client: Arc<HttpWallet>,
 }
 
@@ -64,18 +48,18 @@ impl IntegrationGrinWallet {
 		api_listen_port: u16,
 		node_api: String,
 	) -> IntegrationGrinWallet {
-		let node_client = HTTPNodeClient::new(&node_api, None).unwrap();
-		let mut wallet = Box::new(
-			DefaultWalletImpl::<'static, HTTPNodeClient>::new(node_client.clone()).unwrap(),
-		)
-			as Box<
-				dyn WalletInst<
-					'static,
-					DefaultLCProvider<HTTPNodeClient, ExtKeychain>,
-					HTTPNodeClient,
-					ExtKeychain,
-				>,
-			>;
+		std::fs::create_dir_all(&wallet_dir).unwrap();
+		let node_client = HTTPNodeClient::new(&node_api, None, Duration::from_secs(30)).unwrap();
+		let mut wallet =
+			Box::new(DefaultWalletImpl::<HTTPNodeClient>::new(node_client.clone()).unwrap())
+				as Box<
+					dyn WalletInst<
+						'static,
+						DefaultLCProvider<HTTPNodeClient, ExtKeychain>,
+						HTTPNodeClient,
+						ExtKeychain,
+					>,
+				>;
 
 		// Wallet LifeCycle Provider provides all functions init wallet and work with seeds, etc...
 		let lc = wallet.lc_provider().unwrap();
@@ -105,20 +89,20 @@ impl IntegrationGrinWallet {
 		// Start owner API
 		let km = Arc::new(Mutex::new(None));
 		let wallet = Arc::new(Mutex::new(wallet));
-		let owner_api = Arc::new(Owner::new(wallet.clone(), None));
+		let config_path = PathBuf::from(&wallet_dir).join("grin-wallet.toml");
+		let owner_api = Arc::new(Owner::new(wallet.clone(), None, config_path.clone()));
 
 		let address_str = format!("127.0.0.1:{}", api_listen_port);
 		let address_str_2 = format!("127.0.0.1:{}", api_listen_port);
-		let thr_wallet = wallet.clone();
+		let mut listener_api = Owner::new(wallet.clone(), None, config_path);
 		let _thread_handle = thread::spawn(move || {
 			controller::owner_listener(
-				thr_wallet,
+				&mut listener_api,
 				km,
 				address_str.as_str(),
 				None,
 				None,
 				Some(true),
-				None,
 				false,
 			)
 			.unwrap()
@@ -131,7 +115,6 @@ impl IntegrationGrinWallet {
 		);
 
 		IntegrationGrinWallet {
-			wallet,
 			api_listen_port,
 			owner_api,
 			http_client,
@@ -150,6 +133,18 @@ impl IntegrationGrinWallet {
 			.async_perform_request("retrieve_summary_info", &params)
 			.await?;
 		Ok(wallet_info)
+	}
+
+	pub async fn async_scan(&self) -> Result<(), mwixnet::WalletError> {
+		let params = json!({
+			"token": self.http_client.get_token(),
+			"start_height": null,
+			"delete_unconfirmed": false,
+		});
+		self.http_client
+			.clone()
+			.async_perform_request("scan", &params)
+			.await
 	}
 
 	pub async fn async_send(
@@ -194,7 +189,7 @@ impl IntegrationGrinWallet {
 		});
 		self.http_client
 			.clone()
-			.async_perform_request("tx_lock_outputs", &params)
+			.async_perform_request::<()>("tx_lock_outputs", &params)
 			.await?;
 
 		Ok(slate)
@@ -271,90 +266,31 @@ impl IntegrationGrinWallet {
 		Ok(response)
 	}
 
-	pub fn build_onion(
+	pub async fn async_create_mwixnet_req(
 		&self,
 		commitment: &Commitment,
-		server_pubkeys: &Vec<xPublicKey>,
-	) -> Result<(Onion, ComSignature), grin_wallet_libwallet::Error> {
-		let keychain = self
-			.wallet
-			.lock()
-			.lc_provider()?
-			.wallet_inst()?
-			.keychain(self.keychain_mask().as_ref())?;
-		let (_, outputs) =
-			self.owner_api
-				.retrieve_outputs(self.keychain_mask().as_ref(), false, false, None)?;
-
-		let mut output = None;
-		for o in &outputs {
-			if o.commit == *commitment {
-				output = Some(o.output.clone());
-				break;
-			}
-		}
-
-		if output.is_none() {
-			return Err(grin_wallet_libwallet::Error::GenericError(String::from(
-				"output not found",
-			)));
-		}
-
-		let amount = output.clone().unwrap().value;
-		let input_blind = keychain.derive_key(
-			amount,
-			&output.clone().unwrap().key_id,
-			SwitchCommitmentType::Regular,
-		)?;
-
-		let fee = tx_fee(1, 1, 1);
-		let new_amount = amount - (fee * server_pubkeys.len() as u64);
-		let new_output = self.owner_api.build_output(
-			self.keychain_mask().as_ref(),
-			OutputFeatures::Plain,
-			new_amount,
-		)?;
-
-		let secp = Secp256k1::new();
-		let mut blind_sum = new_output
-			.blind
-			.split(&BlindingFactor::from_secret_key(input_blind.clone()), &secp)?;
-
-		let hops = server_pubkeys
+		server_keys: &[MwixnetServerPublicKey],
+	) -> Result<MwixnetReqCreationResult, mwixnet::WalletError> {
+		let server_keys = server_keys
 			.iter()
-			.enumerate()
-			.map(|(i, &p)| {
-				if (i + 1) == server_pubkeys.len() {
-					Hop {
-						server_pubkey: p.clone(),
-						excess: blind_sum.secret_key(&secp).unwrap(),
-						fee: FeeFields::from(fee as u32),
-						rangeproof: Some(new_output.output.proof.clone()),
-					}
-				} else {
-					let hop_excess = BlindingFactor::rand(&secp);
-					blind_sum = blind_sum.split(&hop_excess, &secp).unwrap();
-					Hop {
-						server_pubkey: p.clone(),
-						excess: hop_excess.secret_key(&secp).unwrap(),
-						fee: FeeFields::from(fee as u32),
-						rangeproof: None,
-					}
-				}
-			})
-			.collect();
-
-		let onion = grin_onion::create_onion(&commitment, &hops).unwrap();
-		let comsig = ComSignature::sign(amount, &input_blind, &onion.serialize().unwrap()).unwrap();
-
-		Ok((onion, comsig))
+			.map(|key| key.to_hex())
+			.collect::<Vec<_>>();
+		let params = json!({
+			"token": self.http_client.get_token(),
+			"commitment": commitment.to_hex(),
+			"fee_per_hop": "50000000",
+			"lock_output": true,
+			"server_keys": server_keys,
+		});
+		self.http_client
+			.clone()
+			.async_perform_request("create_mwixnet_req", &params)
+			.await
 	}
 
 	pub fn owner_api(
 		&self,
-	) -> Arc<
-		Owner<DefaultLCProvider<'static, HTTPNodeClient, ExtKeychain>, HTTPNodeClient, ExtKeychain>,
-	> {
+	) -> Arc<Owner<DefaultLCProvider<HTTPNodeClient, ExtKeychain>, HTTPNodeClient, ExtKeychain>> {
 		self.owner_api.clone()
 	}
 

@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
-use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::secp;
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use secp256k1zkp::{PublicKey, Secp256k1, SecretKey};
 
 use crate::http;
@@ -94,7 +94,7 @@ impl HttpWallet {
 		wallet_owner_secret: &Option<String>,
 	) -> Result<SecretKey, WalletError> {
 		let secp = Secp256k1::new();
-		let ephemeral_sk = secp::random_secret();
+		let ephemeral_sk = secp::random_secret(false);
 		let ephemeral_pk = PublicKey::from_secret_key(&secp, &ephemeral_sk).unwrap();
 		let ephemeral_pk_bytes = ephemeral_pk.serialize_vec(&secp, true);
 		let init_params = json!({
@@ -183,6 +183,7 @@ impl Wallet for HttpWallet {
 
 #[cfg(test)]
 pub mod mock {
+	use super::grin_onion;
 	use std::borrow::BorrowMut;
 	use std::sync::{Arc, Mutex};
 
@@ -224,13 +225,13 @@ pub mod mock {
 			amount: u64,
 		) -> Result<(BlindingFactor, Output), WalletError> {
 			let secp = Secp256k1::new();
-			let blind = secp::random_secret();
+			let blind = secp::random_secret(false);
 			let commit = secp::commit(amount, &blind).unwrap();
 			let proof = secp.bullet_proof(
 				amount,
 				blind.clone(),
-				secp::random_secret(),
-				secp::random_secret(),
+				secp::random_secret(false),
+				secp::random_secret(false),
 				None,
 				None,
 			);

@@ -4,14 +4,11 @@ extern crate grin_wallet_controller as wallet_controller;
 extern crate grin_wallet_impls as wallet;
 extern crate grin_wallet_libwallet as libwallet;
 
-use futures::channel::oneshot;
-
 use grin_core as core;
 
 use grin_p2p as p2p;
 use grin_servers as servers;
 
-use grin_util::logger::LogEntry;
 use grin_util::{Mutex, StopState};
 use std::default::Default;
 use std::net::SocketAddr;
@@ -37,21 +34,15 @@ impl IntegrationGrinNode {
 
 		// Start the node in a new thread
 		thread::spawn(move || {
-			let api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>) =
-				Box::leak(Box::new(oneshot::channel::<()>()));
-
-			servers::Server::start(
+			let api_chan = tokio::sync::mpsc::channel::<()>(1);
+			let server = servers::Server::start(
 				server_config_thread.clone(),
-				None,
-				move |serv: servers::Server, _: Option<mpsc::Receiver<LogEntry>>| {
-					// Signal that the callback has been called
-					tx.send(serv).unwrap();
-					// Do other necessary stuff here
-				},
 				Some(stop_state_thread.clone()),
+				None,
 				api_chan,
 			)
 			.unwrap();
+			tx.send(server).unwrap();
 		});
 
 		// Wait for the signal from the node-running thread
@@ -96,7 +87,7 @@ impl GrinNodeManager {
 			api_secret_path: None,
 			db_root: format!("{}/nodes/{}", self.working_dir, self.nodes.len()),
 			p2p_config: p2p::P2PConfig {
-				port: 13414,
+				port: 13414 + self.nodes.len() as u16,
 				seeding_type: p2p::Seeding::None,
 				..p2p::P2PConfig::default()
 			},

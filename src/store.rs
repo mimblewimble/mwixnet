@@ -1,5 +1,5 @@
-use grin_core::core::{Input, Transaction};
 use grin_core::core::hash::Hash;
+use grin_core::core::{Input, Transaction};
 use grin_core::ser::{
 	self, DeserializationMode, ProtocolVersion, Readable, Reader, Writeable, Writer,
 };
@@ -7,10 +7,10 @@ use grin_store::{self as store, Store};
 use grin_util::ToHex;
 use thiserror::Error;
 
-use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::secp::{self, Commitment, RangeProof, SecretKey};
 use grin_onion::onion::Onion;
 use grin_onion::util::{read_optional, write_optional};
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
 const DB_NAME: &str = "swap";
 const STORE_SUBPATH: &str = "swaps";
@@ -213,8 +213,15 @@ impl From<ser::Error> for StoreError {
 impl SwapStore {
 	/// Create new chain store
 	pub fn new(db_root: &str) -> Result<SwapStore, StoreError> {
-		let db = Store::new(db_root, Some(DB_NAME), Some(STORE_SUBPATH), None)
-			.map_err(StoreError::OpenError)?;
+		let db = Store::new(
+			db_root,
+			Some(DB_NAME),
+			Some(STORE_SUBPATH),
+			vec![SWAP_PREFIX, TX_PREFIX],
+			None,
+			None,
+		)
+		.map_err(StoreError::OpenError)?;
 		Ok(SwapStore { db })
 	}
 
@@ -226,12 +233,11 @@ impl SwapStore {
 		value: &Vec<u8>,
 		overwrite: bool,
 	) -> Result<bool, store::lmdb::Error> {
-		let batch = self.db.batch()?;
-		let key = store::to_key(prefix, k);
-		if !overwrite && batch.exists(&key[..])? {
+		let mut batch = self.db.batch()?;
+		if !overwrite && batch.exists(Some(prefix), k.as_ref())? {
 			Ok(false)
 		} else {
-			batch.put(&key[..], &value[..])?;
+			batch.put(Some(prefix), k.as_ref(), &value[..])?;
 			batch.commit()?;
 			Ok(true)
 		}
@@ -239,7 +245,7 @@ impl SwapStore {
 
 	/// Reads a single value by key
 	fn read<K: AsRef<[u8]> + Copy, V: Readable>(&self, prefix: u8, k: K) -> Result<V, StoreError> {
-		store::option_to_not_found(self.db.get_ser(&store::to_key(prefix, k), None), || {
+		store::option_to_not_found(self.db.get_ser(Some(prefix), k.as_ref(), None), || {
 			format!("{}:{}", prefix, k.to_hex())
 		})
 		.map_err(StoreError::ReadError)
@@ -260,24 +266,29 @@ impl SwapStore {
 
 	/// Iterator over all swaps.
 	pub fn swaps_iter(&self) -> Result<impl Iterator<Item = SwapData>, StoreError> {
-		let key = store::to_key(SWAP_PREFIX, "");
 		let protocol_version = self.db.protocol_version();
-		self.db
-			.iter(&key[..], move |_, mut v| {
-				ser::deserialize(&mut v, protocol_version, DeserializationMode::default())
-					.map_err(From::from)
-			})
-			.map_err(|e| StoreError::ReadError(e))
+		let swaps =
+			self.db
+				.iter(Some(SWAP_PREFIX), move |key, mut v| {
+					ser::deserialize(&mut v, protocol_version, DeserializationMode::default())
+						.map_err(|e| {
+							error!("Failed to deserialize swap '{}': {:?}", key.to_hex(), e);
+							e.into()
+						})
+				})
+				.map_err(StoreError::ReadError)?
+				.collect::<Result<Vec<_>, _>>()
+				.map_err(StoreError::ReadError)?;
+		Ok(swaps.into_iter())
 	}
 
 	/// Checks if a matching swap exists in the database
 	#[allow(dead_code)]
 	pub fn swap_exists(&self, input_commit: &Commitment) -> Result<bool, StoreError> {
-		let key = store::to_key(SWAP_PREFIX, input_commit);
 		self.db
 			.batch()
 			.map_err(StoreError::ReadError)?
-			.exists(&key[..])
+			.exists(Some(SWAP_PREFIX), input_commit.as_ref())
 			.map_err(StoreError::ReadError)
 	}
 
@@ -308,16 +319,18 @@ impl SwapStore {
 
 #[cfg(test)]
 mod tests {
+	use super::grin_onion;
 	use std::cmp::Ordering;
 
 	use grin_core::core::{Input, OutputFeatures};
 	use grin_core::global::{self, ChainTypes};
+	use grin_core::ser::{self, ProtocolVersion};
 	use rand::RngCore;
 
 	use grin_onion::crypto::secp;
 	use grin_onion::test_util as onion_test_util;
 
-	use crate::store::{StoreError, SwapData, SwapStatus, SwapStore};
+	use crate::store::{StoreError, SwapData, SwapStatus, SwapStore, SWAP_PREFIX};
 
 	fn new_store(test_name: &str) -> SwapStore {
 		global::set_local_chain_type(ChainTypes::AutomatedTesting);
@@ -328,7 +341,7 @@ mod tests {
 
 	fn rand_swap_with_status(status: SwapStatus) -> SwapData {
 		SwapData {
-			excess: secp::random_secret(),
+			excess: secp::random_secret(false),
 			output_commit: onion_test_util::rand_commit(),
 			rangeproof: Some(onion_test_util::rand_proof()),
 			input: Input::new(OutputFeatures::Plain, onion_test_util::rand_commit()),
@@ -353,6 +366,38 @@ mod tests {
 			}
 		};
 		rand_swap_with_status(status)
+	}
+
+	#[test]
+	fn read_migrated_swap() -> Result<(), Box<dyn std::error::Error>> {
+		let store = new_store("read_migrated_swap");
+		let swap = rand_swap();
+		let data = ser::ser_vec(&swap, ProtocolVersion::local())?;
+
+		// Migration stores raw keys in the prefix database.
+		let mut batch = store.db.batch()?;
+		batch.put(Some(SWAP_PREFIX), swap.input.commit.as_ref(), &data)?;
+		batch.commit()?;
+
+		assert_eq!(store.get_swap(&swap.input.commit)?, swap);
+		assert!(store.swap_exists(&swap.input.commit)?);
+		assert_eq!(
+			store.save_swap(&swap, false),
+			Err(StoreError::AlreadyExists(swap.input.commit))
+		);
+		Ok(())
+	}
+
+	#[test]
+	fn invalid_swap_iter() -> Result<(), Box<dyn std::error::Error>> {
+		let store = new_store("invalid_swap_iter");
+		let swap = rand_swap();
+		let mut batch = store.db.batch()?;
+		batch.put(Some(SWAP_PREFIX), swap.input.commit.as_ref(), b"invalid")?;
+		batch.commit()?;
+
+		assert!(store.swaps_iter().is_err());
+		Ok(())
 	}
 
 	#[test]

@@ -4,11 +4,8 @@ use futures::FutureExt;
 use jsonrpc_core::{BoxFuture, Value};
 use jsonrpc_derive::rpc;
 use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
-use serde::{Deserialize, Serialize};
 
-use grin_wallet_libwallet::mwixnet::onion as grin_onion;
-use grin_onion::crypto::comsig::{self, ComSignature};
-use grin_onion::onion::Onion;
+pub use grin_wallet_libwallet::mwixnet::SwapReq;
 
 use crate::config::ServerConfig;
 use crate::mix_client::MixClient;
@@ -17,15 +14,11 @@ use crate::servers::swap::{SwapError, SwapServer, SwapServerImpl};
 use crate::store::SwapStore;
 use crate::wallet::Wallet;
 
-#[derive(Serialize, Deserialize)]
-pub struct SwapReq {
-	onion: Onion,
-	#[serde(with = "comsig::comsig_serde")]
-	comsig: ComSignature,
-}
-
 #[rpc(server)]
 pub trait SwapAPI {
+	#[rpc(name = "health")]
+	fn health(&self) -> jsonrpc_core::Result<Value>;
+
 	#[rpc(name = "swap")]
 	fn swap(&self, swap: SwapReq) -> BoxFuture<jsonrpc_core::Result<Value>>;
 }
@@ -45,7 +38,7 @@ impl RPCSwapServer {
 		ServerBuilder::new(io)
 			.event_loop_executor(runtime_handle)
 			.cors(DomainsValidation::Disabled)
-			.request_middleware(|request: hyper::Request<hyper::Body>| {
+			.request_middleware(|request: hyper_legacy::Request<hyper_legacy::Body>| {
 				if request.uri() == "/v1" {
 					request.into()
 				} else {
@@ -71,6 +64,10 @@ impl From<SwapError> for jsonrpc_core::Error {
 }
 
 impl SwapAPI for RPCSwapServer {
+	fn health(&self) -> jsonrpc_core::Result<Value> {
+		Ok(Value::String("ok".into()))
+	}
+
 	fn swap(&self, swap: SwapReq) -> BoxFuture<jsonrpc_core::Result<Value>> {
 		let server = self.server.clone();
 		async move {
@@ -86,7 +83,7 @@ pub fn listen(
 	rt_handle: &tokio::runtime::Handle,
 	server_config: &ServerConfig,
 	next_server: Option<Arc<dyn MixClient>>,
-	wallet: Arc<dyn Wallet>,
+	wallet: Option<Arc<dyn Wallet>>,
 	node: Arc<dyn GrinNode>,
 	store: SwapStore,
 ) -> std::result::Result<
@@ -99,7 +96,7 @@ pub fn listen(
 	let server = SwapServerImpl::new(
 		server_config.clone(),
 		next_server,
-		wallet.clone(),
+		wallet,
 		node.clone(),
 		store,
 	);
@@ -120,7 +117,8 @@ mod tests {
 	use std::net::TcpListener;
 	use std::sync::Arc;
 
-	use hyper::{Body, Client, Request, Response};
+	use grin_wallet_libwallet::mwixnet::onion as grin_onion;
+	use hyper_legacy::{Body, Client, Request, Response};
 	use tokio::sync::Mutex;
 
 	use grin_onion::create_onion;
@@ -128,12 +126,12 @@ mod tests {
 	use grin_onion::crypto::secp;
 
 	use crate::config::ServerConfig;
-	use crate::servers::swap::{SwapError, SwapServer};
 	use crate::servers::swap::mock::MockSwapServer;
+	use crate::servers::swap::{SwapError, SwapServer};
 	use crate::servers::swap_rpc::{RPCSwapServer, SwapReq};
 
 	async fn body_to_string(req: Response<Body>) -> String {
-		let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
+		let body_bytes = hyper_legacy::body::to_bytes(req.into_body()).await.unwrap();
 		String::from_utf8(body_bytes.to_vec()).unwrap()
 	}
 
@@ -144,13 +142,15 @@ mod tests {
 		runtime_handle: &tokio::runtime::Handle,
 	) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
 		let server_config = ServerConfig {
-			key: secp::random_secret(),
+			key: secp::random_secret(false),
 			interval_s: 1,
 			addr: TcpListener::bind("127.0.0.1:0")?.local_addr()?,
 			grin_node_url: "127.0.0.1:3413".parse()?,
-			grin_node_secret_path: None,
+			grin_node_foreign_api_secret_path: None,
 			wallet_owner_url: "127.0.0.1:3420".parse()?,
 			wallet_owner_secret_path: None,
+			collect_fees: true,
+			min_circuit_timeout_ms: crate::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
 			prev_server: None,
 			next_server: None,
 		};
@@ -185,15 +185,37 @@ mod tests {
 
 	// todo: Test all error types
 
+	#[test]
+	fn health_success() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+		let rt = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()?;
+		let server: Arc<Mutex<dyn SwapServer>> = Arc::new(Mutex::new(MockSwapServer::new()));
+		let request = r#"{"jsonrpc":"2.0","method":"health","params":[],"id":1}"#;
+		let rt_handle = rt.handle().clone();
+		let response = rt.block_on(async_make_request(server, request.into(), &rt_handle))?;
+
+		assert_eq!(
+			response,
+			"{\"jsonrpc\":\"2.0\",\"result\":\"ok\",\"id\":1}\n"
+		);
+		Ok(())
+	}
+
 	/// Demonstrates a successful swap response
 	#[test]
 	fn swap_success() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		let rt = tokio::runtime::Builder::new_multi_thread()
 			.enable_all()
 			.build()?;
-		let commitment = secp::commit(1234, &secp::random_secret())?;
-		let onion = create_onion(&commitment, &vec![])?;
-		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
+		let commitment = secp::commit(1234, &secp::random_secret(false))?;
+		let onion = create_onion(&commitment, &vec![], false)?;
+		let comsig = ComSignature::sign(
+			1234,
+			&secp::random_secret(false),
+			&onion.serialize()?,
+			false,
+		)?;
 		let swap = SwapReq {
 			onion: onion.clone(),
 			comsig,
@@ -227,7 +249,7 @@ mod tests {
 		);
 		let rt_handle = rt.handle().clone();
 		let response = rt.block_on(async_make_request(server, req, &rt_handle))?;
-		let expected = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Invalid params: missing field `onion`.\"},\"id\":\"1\"}\n";
+		let expected = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Invalid params: missing field `comsig`.\"},\"id\":\"1\"}\n";
 		assert_eq!(response, expected);
 		Ok(())
 	}
@@ -239,9 +261,14 @@ mod tests {
 			.enable_all()
 			.build()?;
 
-		let commitment = secp::commit(1234, &secp::random_secret())?;
-		let onion = create_onion(&commitment, &vec![])?;
-		let comsig = ComSignature::sign(1234, &secp::random_secret(), &onion.serialize()?)?;
+		let commitment = secp::commit(1234, &secp::random_secret(false))?;
+		let onion = create_onion(&commitment, &vec![], false)?;
+		let comsig = ComSignature::sign(
+			1234,
+			&secp::random_secret(false),
+			&onion.serialize()?,
+			false,
+		)?;
 		let swap = SwapReq {
 			onion: onion.clone(),
 			comsig,

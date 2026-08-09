@@ -10,9 +10,9 @@ use serde_json::json;
 use thiserror::Error;
 use tor_rtcompat::Runtime;
 
-use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::dalek::{self, DalekPublicKey};
 use grin_onion::onion::Onion;
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
 use crate::config::ServerConfig;
 use crate::servers::mix_rpc::{MixReq, MixResp};
@@ -67,14 +67,14 @@ impl<R: Runtime> MixClientImpl<R> {
 	) -> Result<D, MixClientError> {
 		let url = format!("{}/v1", addr.to_http_str());
 		let request_str = serde_json::to_string(&build_request(method, params)).unwrap();
-		let hyper_request =
-			http::build_request(&url, &None, request_str).map_err(MixClientError::CommError)?;
-
-		let hyper_client = self.tor.lock().new_hyper_client();
-		let res = hyper_client.request(hyper_request).await.unwrap();
-
-		let body_bytes = hyper::body::to_bytes(res.into_body()).await.unwrap();
-		let res = String::from_utf8(body_bytes.to_vec()).unwrap();
+		let tor_client = self
+			.tor
+			.lock()
+			.client()
+			.ok_or_else(|| MixClientError::Custom("Tor client is not running".into()))?;
+		let res = tor::async_post(tor_client, &url, request_str)
+			.await
+			.map_err(MixClientError::Tor)?;
 
 		let response: Response =
 			serde_json::from_str(&res).map_err(MixClientError::DecodeResponseError)?;
@@ -108,6 +108,7 @@ impl<R: Runtime> MixClient for MixClientImpl<R> {
 
 #[cfg(test)]
 pub mod mock {
+	use super::grin_onion;
 	use std::collections::HashMap;
 
 	use async_trait::async_trait;
@@ -149,6 +150,7 @@ pub mod mock {
 
 #[cfg(test)]
 pub mod test_util {
+	use super::grin_onion;
 	use std::sync::Arc;
 
 	use async_trait::async_trait;

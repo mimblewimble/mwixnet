@@ -7,7 +7,7 @@ The Swap Server provides a single JSON-RPC API with the method `swap`. This API 
 ## SWAP
 
 ### Request
-The `swap` method accepts a single JSON object containing the following fields:
+The `swap` method accepts one positional parameter: a `SwapReq` object containing:
 
 - `onion`: an `Onion` data structure, which is the encrypted onion packet containing the key information necessary to transform the user's output.
 - `comsig`: a Commitment Signature that proves the client knows the secret key and value of the output's commitment.
@@ -20,20 +20,20 @@ The `Onion` data structure consists of the following fields:
 - `commit`: the Pedersen commitment before adjusting the excess and subtracting the fee, represented as a 33-byte `secp256k1` Pedersen commitment.
 - `data`: a vector of encrypted payloads, each representing a layer of the onion. When completely decrypted, these are serialized `Payload` objects.
 
-Each entry in the `enc_payloads` vector corresponds to a server in the system, in order, with the first entry containing the payload for the swap server, and the last entry containing the payload for the final mix server.
+Each entry in `data` corresponds to one server in route order, from the swap server to the final mixer.
 
 #### `Payload` data structure
 
 A `Payload` represents a single, decrypted/peeled layer of an Onion. It consists of the following fields:
 
-- `next_ephemeral_pk`: an `xPublicKey` representing the public key for the next layer.
+- `next_ephemeral_pk`: the X25519 ephemeral public key for the next layer.
 - `excess`: a `SecretKey` representing the excess value.
 - `fee`: a `FeeFields` value representing the transaction fee.
 - `rangeproof`: an optional `RangeProof` value.
 
 ### Response
 
-A successful call to the 'swap' API will result in an empty JSON-RPC response with no error.
+A successful call returns the JSON-RPC result `"success"`.
 
 In case of errors, the API will return a `SwapError` type with one of the following variants:
 
@@ -46,6 +46,8 @@ In case of errors, the API will return a `SwapError` type with one of the follow
 - `PeelOnionFailure`: Failed to peel onion layer due to an `OnionError`.
 - `FeeTooLow`: The provided fee is too low.
 - `StoreError`: An error occurred when saving swap to the data store.
+- `TxError`: An error occurred while building the swap transaction.
+- `NodeError`: An error occurred while communicating with the Grin node.
 - `ClientError`: An error occurred during client communication.
 - `SwapTxNotFound`: The previous swap transaction was not found in data store.
 - `UnknownError`: An unknown error occurred.

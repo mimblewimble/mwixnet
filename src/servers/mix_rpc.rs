@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use jsonrpc_derive::rpc;
+use jsonrpc_http_server::jsonrpc_core::{self, BoxFuture, IoHandler, Value};
 use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
-use jsonrpc_http_server::jsonrpc_core::{self, BoxFuture, IoHandler};
 use serde::{Deserialize, Serialize};
 
-use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::dalek::{self, DalekSignature};
 use grin_onion::onion::Onion;
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
 use crate::config::ServerConfig;
 use crate::mix_client::MixClient;
@@ -38,6 +38,9 @@ impl MixReq {
 
 #[rpc(server)]
 pub trait MixAPI {
+	#[rpc(name = "health")]
+	fn health(&self) -> jsonrpc_core::Result<Value>;
+
 	#[rpc(name = "mix")]
 	fn mix(&self, mix: MixReq) -> BoxFuture<jsonrpc_core::Result<MixResp>>;
 }
@@ -57,7 +60,7 @@ impl RPCMixServer {
 		ServerBuilder::new(io)
 			.event_loop_executor(runtime_handle)
 			.cors(DomainsValidation::Disabled)
-			.request_middleware(|request: hyper::Request<hyper::Body>| {
+			.request_middleware(|request: hyper_legacy::Request<hyper_legacy::Body>| {
 				if request.uri() == "/v1" {
 					request.into()
 				} else {
@@ -76,6 +79,10 @@ impl From<MixError> for jsonrpc_core::Error {
 }
 
 impl MixAPI for RPCMixServer {
+	fn health(&self) -> jsonrpc_core::Result<Value> {
+		Ok(Value::String("ok".into()))
+	}
+
 	fn mix(&self, mix: MixReq) -> BoxFuture<jsonrpc_core::Result<MixResp>> {
 		let server = self.server.clone();
 		async move {
@@ -95,7 +102,7 @@ pub fn listen(
 	rt_handle: &tokio::runtime::Handle,
 	server_config: ServerConfig,
 	next_server: Option<Arc<dyn MixClient>>,
-	wallet: Arc<dyn Wallet>,
+	wallet: Option<Arc<dyn Wallet>>,
 	node: Arc<dyn GrinNode>,
 ) -> Result<
 	(
@@ -104,12 +111,7 @@ pub fn listen(
 	),
 	Box<dyn std::error::Error>,
 > {
-	let server = MixServerImpl::new(
-		server_config.clone(),
-		next_server,
-		wallet.clone(),
-		node.clone(),
-	);
+	let server = MixServerImpl::new(server_config.clone(), next_server, wallet, node.clone());
 	let server = Arc::new(tokio::sync::Mutex::new(server));
 
 	let rpc_server = RPCMixServer {

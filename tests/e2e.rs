@@ -4,6 +4,8 @@ extern crate log;
 use std::ops::Deref;
 
 use function_name::named;
+use grin_chain::{Chain, Options};
+use grin_core::core::hash::Hashed;
 use grin_core::global;
 use grin_util::logger::LoggingConfig;
 use log::Level;
@@ -38,6 +40,14 @@ fn setup_test(test_name: &str) -> (GrinNodeManager, GrinWalletManager, String) {
 	let wallets = GrinWalletManager::new(test_dir.as_str());
 
 	(nodes, wallets, test_dir)
+}
+
+fn copy_blocks(source: &Chain, target: &Chain, start_height: u64, end_height: u64) {
+	for height in start_height..=end_height {
+		let hash = source.get_header_by_height(height).unwrap().hash();
+		let block = source.get_block(&hash).unwrap();
+		target.process_block(block, Options::MINE).unwrap();
+	}
 }
 
 #[test]
@@ -91,20 +101,23 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 		miner
 			.async_mine_next_block(&mining_wallet, &vec![tx1, tx2])
 			.await;
+		let fork_height = node1_server.chain.head_header().unwrap().height;
 
 		let user1_km = user1_wallet.lock().keychain_mask();
 		let (_, outputs) = user1_wallet
 			.lock()
 			.owner_api()
-			.retrieve_outputs(user1_km.as_ref(), false, false, None)
+			.retrieve_outputs(user1_km.as_ref(), false, true, None)
 			.unwrap();
 		assert_eq!(outputs.len(), 1);
 		for output in &outputs {
-			let (onion, comsig) = user1_wallet
+			let creation = user1_wallet
 				.lock()
-				.build_onion(&output.commit, &servers.get_pub_keys())
+				.async_create_mwixnet_req(&output.commit, &servers.get_server_keys())
+				.await
 				.unwrap();
-			servers.swapper.async_swap(&onion, &comsig).await.unwrap();
+			assert!(creation.tx_id.is_some());
+			servers.swapper.async_swap(&creation.request).await.unwrap();
 		}
 
 		let mining_wallet_info = mining_wallet
@@ -126,7 +139,60 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 			.unwrap();
 		println!("User2 wallet: {:?}", user2_wallet_info);
 
-		let _tx = servers.swapper.async_execute_round().await.unwrap();
+		let tx = servers
+			.swapper
+			.async_execute_round()
+			.await
+			.unwrap()
+			.unwrap();
+		miner
+			.async_mine_next_block(&mining_wallet, &vec![tx.as_ref().clone()])
+			.await;
+		let user1_wallet_info = user1_wallet
+			.lock()
+			.async_retrieve_summary_info()
+			.await
+			.unwrap();
+		assert_eq!(user1_wallet_info.amount_currently_spendable, 9_850_000_000);
+		assert_eq!(user1_wallet_info.amount_locked, 0);
+
+		let node2 = nodes.new_node();
+		let node2_server = node2.lock().start();
+		copy_blocks(&node1_server.chain, &node2_server.chain, 1, fork_height);
+		let fork_miner = Miner::new(node2_server.chain.clone());
+		fork_miner.async_mine_empty_blocks(&mining_wallet, 2).await;
+		copy_blocks(
+			&node2_server.chain,
+			&node1_server.chain,
+			fork_height + 1,
+			fork_height + 2,
+		);
+		user1_wallet.lock().async_scan().await.unwrap();
+		let user1_wallet_info = user1_wallet
+			.lock()
+			.async_retrieve_summary_info()
+			.await
+			.unwrap();
+		assert_eq!(user1_wallet_info.amount_currently_spendable, 10_000_000_000);
+		assert_eq!(user1_wallet_info.amount_locked, 0);
+
+		let tx = servers
+			.swapper
+			.async_check_reorg(&tx)
+			.await
+			.unwrap()
+			.unwrap();
+		miner
+			.async_mine_next_block(&mining_wallet, &vec![tx.as_ref().clone()])
+			.await;
+		user1_wallet.lock().async_scan().await.unwrap();
+		let user1_wallet_info = user1_wallet
+			.lock()
+			.async_retrieve_summary_info()
+			.await
+			.unwrap();
+		assert_eq!(user1_wallet_info.amount_currently_spendable, 9_850_000_000);
+		assert_eq!(user1_wallet_info.amount_locked, 0);
 	});
 
 	servers.stop_all();
