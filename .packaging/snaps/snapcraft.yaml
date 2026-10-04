@@ -1,0 +1,45 @@
+name: mwixnet
+adopt-info: mwixnet
+summary: CoinSwap server for Grin
+description: |
+  MWixnet CoinSwap server and onion health monitor
+
+confinement: strict
+grade: SNAP_GRADE
+base: core22
+architectures:
+  - build-on: [arm64]
+    build-for: [arm64]
+  - build-on: [amd64]
+    build-for: [amd64]
+
+parts:
+  mwixnet:
+    plugin: rust
+    source: .
+    override-pull: |
+      craftctl default
+      craftctl set version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+    build-packages:
+      - build-essential
+      - clang
+      - cmake
+      - git
+      - libssl-dev
+      - perl
+      - pkg-config
+      - zlib1g-dev
+
+apps:
+  mwixnet:
+    environment:
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+    command: bin/mwixnet
+    plugs: [home, network, network-bind]
+  monitor:
+    environment:
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+    command: bin/mwixnet-monitor
+    plugs: [home, network]

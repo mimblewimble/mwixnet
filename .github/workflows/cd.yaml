@@ -1,0 +1,397 @@
+name: Continuous Deployment
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - staging
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  BUILD_LABEL: ${{ github.ref_name == 'master' && 'latest' || github.ref_name == 'staging' && 'staging-latest' || github.ref_type == 'tag' && github.ref_name || github.sha }}
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  linux-release:
+    name: Linux Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build
+        run: cargo build --release --locked --bins
+
+      - name: Check binary
+        run: |
+          for binary in mwixnet mwixnet-monitor; do
+            file target/release/"$binary"
+            target/release/"$binary" --help
+          done
+
+      - name: Archive
+        working-directory: target/release
+        run: tar -czf "mwixnet-${BUILD_LABEL}-linux-x86_64.tar.gz" mwixnet mwixnet-monitor
+
+      - name: Create checksum
+        working-directory: target/release
+        run: openssl dgst -sha256 -r "mwixnet-${BUILD_LABEL}-linux-x86_64.tar.gz" > "mwixnet-${BUILD_LABEL}-linux-x86_64-sha256sum.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: linux-x86_64
+          path: |
+            target/release/mwixnet-${{ env.BUILD_LABEL }}-linux-x86_64.tar.gz
+            target/release/mwixnet-${{ env.BUILD_LABEL }}-linux-x86_64-sha256sum.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-musl:
+    name: Linux musl ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            image: messense/rust-musl-cross:x86_64-musl@sha256:ce75e9174325d4fbb3de85c309e2d7ca29f7500169bc4b5d2c611ff7e86d549a
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            image: messense/rust-musl-cross:aarch64-musl@sha256:ecae5dd62d1c938c14f8071d36c16fa699860aace03bfb5284fb1216474d2643
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build
+        env:
+          OPENSSL_STATIC: "1"
+        run: cargo build --release --locked --bins --target ${{ matrix.target }}
+
+      - name: Check binary
+        run: |
+          for name in mwixnet mwixnet-monitor; do
+            binary=target/${{ matrix.target }}/release/$name
+            file "$binary"
+            readelf -l "$binary" > program-headers.txt
+            readelf -d "$binary" > dynamic-section.txt
+            if grep -q INTERP program-headers.txt || grep -q NEEDED dynamic-section.txt; then
+              echo "$name is dynamically linked"
+              exit 1
+            fi
+            "$binary" --help
+          done
+
+      - name: Archive
+        working-directory: target/${{ matrix.target }}/release
+        run: tar -czf "mwixnet-${BUILD_LABEL}-linux-${{ matrix.arch }}-musl.tar.gz" mwixnet mwixnet-monitor
+
+      - name: Create checksum
+        working-directory: target/${{ matrix.target }}/release
+        run: openssl dgst -sha256 -r "mwixnet-${BUILD_LABEL}-linux-${{ matrix.arch }}-musl.tar.gz" > "mwixnet-${BUILD_LABEL}-linux-${{ matrix.arch }}-musl-sha256sum.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: linux-${{ matrix.arch }}-musl
+          path: |
+            target/${{ matrix.target }}/release/mwixnet-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}-musl.tar.gz
+            target/${{ matrix.target }}/release/mwixnet-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}-musl-sha256sum.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  bsd:
+    name: ${{ matrix.name }} x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: cpa.sh {0} --sync-files runner-to-vm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: OpenBSD
+            os: openbsd
+            version: "7.9"
+            install: sudo pkg_add rust git cmake pkgconf gmake curl
+            build: ulimit -n 1024 && LZMA_API_STATIC=1 cargo build --release --locked --bins
+          - name: FreeBSD
+            os: freebsd
+            version: "14.4"
+            install: sudo pkg install -y rust git cmake pkgconf gmake curl perl5
+            build: cargo build --release --locked --bins
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Start ${{ matrix.name }}
+        uses: cross-platform-actions/action@v1.3.0
+        with:
+          operating_system: ${{ matrix.os }}
+          architecture: x86-64
+          version: ${{ matrix.version }}
+          environment_variables: BUILD_LABEL
+          memory: 8G
+          cpu_count: 4
+
+      - name: Install dependencies
+        run: ${{ matrix.install }}
+
+      - name: Build
+        run: ${{ matrix.build }}
+
+      - name: Check binary
+        run: |
+          set -e
+          for name in mwixnet mwixnet-monitor; do
+            binary=target/release/$name
+            file "$binary"
+            if [ "${{ matrix.os }}" = openbsd ]; then
+              objdump -p "$binary" > binary-headers.txt
+              if grep -q 'NEEDED.*liblzma' binary-headers.txt; then
+                echo "$name links liblzma dynamically"
+                exit 1
+              fi
+            fi
+            "$binary" --help
+          done
+
+      - name: Archive
+        run: |
+          set -e
+          cd target/release
+          tar -czf "mwixnet-${BUILD_LABEL}-${{ matrix.os }}-x86_64.tar.gz" mwixnet mwixnet-monitor
+
+      - name: Create checksum
+        run: |
+          set -e
+          cd target/release
+          openssl dgst -sha256 -r "mwixnet-${BUILD_LABEL}-${{ matrix.os }}-x86_64.tar.gz" > "mwixnet-${BUILD_LABEL}-${{ matrix.os }}-x86_64-sha256sum.txt"
+
+      - name: Copy artifacts
+        shell: bash
+        run: |
+          archive="mwixnet-${BUILD_LABEL}-${{ matrix.os }}-x86_64.tar.gz"
+          checksum="mwixnet-${BUILD_LABEL}-${{ matrix.os }}-x86_64-sha256sum.txt"
+          remote="runner@cross_platform_actions_host:${GITHUB_WORKSPACE}/target/release"
+          mkdir -p target/release
+          scp "${remote}/${archive}" "${remote}/${checksum}" target/release/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.os }}-x86_64
+          path: |
+            target/release/mwixnet-${{ env.BUILD_LABEL }}-${{ matrix.os }}-x86_64.tar.gz
+            target/release/mwixnet-${{ env.BUILD_LABEL }}-${{ matrix.os }}-x86_64-sha256sum.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  macos-release-x86:
+    name: macOS Release - x86_64
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - name: Install Rust target
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build
+        run: cargo build --release --locked --bins --target x86_64-apple-darwin
+
+      - name: Check binary
+        run: |
+          for binary in mwixnet mwixnet-monitor; do
+            file target/x86_64-apple-darwin/release/"$binary"
+            target/x86_64-apple-darwin/release/"$binary" --help
+          done
+
+      - name: Archive
+        working-directory: target/x86_64-apple-darwin/release
+        run: tar -czf "mwixnet-${BUILD_LABEL}-macos-x86_64.tar.gz" mwixnet mwixnet-monitor
+
+      - name: Create checksum
+        working-directory: target/x86_64-apple-darwin/release
+        run: openssl dgst -sha256 -r "mwixnet-${BUILD_LABEL}-macos-x86_64.tar.gz" > "mwixnet-${BUILD_LABEL}-macos-x86_64-sha256sum.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-x86_64
+          path: |
+            target/x86_64-apple-darwin/release/mwixnet-${{ env.BUILD_LABEL }}-macos-x86_64.tar.gz
+            target/x86_64-apple-darwin/release/mwixnet-${{ env.BUILD_LABEL }}-macos-x86_64-sha256sum.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  macos-release-arm64:
+    name: macOS Release - arm64
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - name: Install Rust target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build
+        run: cargo build --release --locked --bins --target aarch64-apple-darwin
+
+      - name: Check binary
+        run: |
+          for binary in mwixnet mwixnet-monitor; do
+            file target/aarch64-apple-darwin/release/"$binary"
+            target/aarch64-apple-darwin/release/"$binary" --help
+          done
+
+      - name: Archive
+        working-directory: target/aarch64-apple-darwin/release
+        run: tar -czf "mwixnet-${BUILD_LABEL}-macos-arm64.tar.gz" mwixnet mwixnet-monitor
+
+      - name: Create checksum
+        working-directory: target/aarch64-apple-darwin/release
+        run: openssl dgst -sha256 -r "mwixnet-${BUILD_LABEL}-macos-arm64.tar.gz" > "mwixnet-${BUILD_LABEL}-macos-arm64-sha256sum.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-arm64
+          path: |
+            target/aarch64-apple-darwin/release/mwixnet-${{ env.BUILD_LABEL }}-macos-arm64.tar.gz
+            target/aarch64-apple-darwin/release/mwixnet-${{ env.BUILD_LABEL }}-macos-arm64-sha256sum.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-release:
+    name: Windows Release
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      ROARING_ARCH: x86-64-v2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build
+        run: cargo build --release --locked --bins
+
+      - name: Check binary
+        shell: bash
+        run: |
+          target/release/mwixnet.exe --help
+          target/release/mwixnet-monitor.exe --help
+
+      - name: Archive
+        working-directory: target/release
+        shell: pwsh
+        run: Compress-Archive -Path mwixnet.exe,mwixnet-monitor.exe -DestinationPath "mwixnet-${env:BUILD_LABEL}-win-x86_64.zip"
+
+      - name: Create checksum
+        working-directory: target/release
+        shell: pwsh
+        run: |
+          $archive = "mwixnet-${env:BUILD_LABEL}-win-x86_64.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content -Encoding ascii "mwixnet-${env:BUILD_LABEL}-win-x86_64-sha256sum.txt"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-x86_64
+          path: |
+            target/release/mwixnet-${{ env.BUILD_LABEL }}-win-x86_64.zip
+            target/release/mwixnet-${{ env.BUILD_LABEL }}-win-x86_64-sha256sum.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  docker:
+    name: Docker
+    uses: ./.github/workflows/publish-ghcr.yaml
+    permissions:
+      contents: read
+      packages: write
+
+  snap:
+    name: Snap
+    uses: ./.github/workflows/snap.yaml
+    with:
+      build_label: ${{ github.ref_name == 'master' && 'latest' || github.ref_name == 'staging' && 'staging-latest' || github.ref_type == 'tag' && github.ref_name || github.sha }}
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - linux-release
+      - linux-musl
+      - bsd
+      - macos-release-x86
+      - macos-release-arm64
+      - windows-release
+      - docker
+      - snap
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release
+          pattern: "!digests-*"
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: release/*
+
+  telegram-notify:
+    name: Telegram Notification
+    if: always()
+    needs:
+      - linux-release
+      - linux-musl
+      - bsd
+      - macos-release-x86
+      - macos-release-arm64
+      - windows-release
+      - docker
+      - snap
+      - release
+    uses: ./.github/workflows/telegram.yaml
+    secrets: inherit
+    with:
+      title: MWixnet CD
+      status: ${{ contains(join(needs.*.result, ','), 'failure') && 'failed' || contains(join(needs.*.result, ','), 'cancelled') && 'cancelled' || 'success' }}
+      details: |
+        <b>Linux:</b> ${{ needs['linux-release'].result }}
+        <b>musl:</b> ${{ needs['linux-musl'].result }}
+        <b>BSD:</b> ${{ needs.bsd.result }}
+        <b>macOS x86:</b> ${{ needs['macos-release-x86'].result }}
+        <b>macOS arm64:</b> ${{ needs['macos-release-arm64'].result }}
+        <b>Windows:</b> ${{ needs['windows-release'].result }}
+        <b>Docker:</b> ${{ needs.docker.result }}
+        <b>Snap:</b> ${{ needs.snap.result }}
+        <b>Release:</b> ${{ needs.release.result }}
+      image_tag: ${{ needs.docker.outputs.image_tag }}
+      artifact_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      commit_message: ${{ github.event.head_commit.message }}

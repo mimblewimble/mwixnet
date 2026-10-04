@@ -20,13 +20,12 @@
 use crate::common::types::BlockFees;
 use crate::common::wallet::IntegrationGrinWallet;
 use chrono::prelude::Utc;
-use chrono::{DateTime, NaiveDateTime};
+use chrono::DateTime;
 use grin_chain::Chain;
 use grin_core::core::hash::{Hash, Hashed};
 use grin_core::core::{Block, BlockHeader, Transaction};
 use grin_core::{consensus, global};
 use grin_keychain::Identifier;
-use grin_util::Mutex;
 use rand::{thread_rng, Rng};
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,19 +43,19 @@ impl Miner {
 
 	pub async fn async_mine_empty_blocks(
 		&self,
-		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
+		wallet: &Arc<IntegrationGrinWallet>,
 		num_blocks: usize,
 	) {
 		for _ in 0..num_blocks {
-			self.async_mine_next_block(wallet, &vec![]).await;
+			self.async_mine_next_block(wallet, &[]).await;
 		}
 	}
 
 	/// Builds a new block on top of the existing chain.
 	pub async fn async_mine_next_block(
 		&self,
-		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
-		txs: &Vec<Transaction>,
+		wallet: &Arc<IntegrationGrinWallet>,
+		txs: &[Transaction],
 	) {
 		info!("Starting test miner loop.");
 
@@ -125,15 +124,15 @@ impl Miner {
 	// Warning: This call does not return until/unless a new block can be built
 	async fn async_get_block(
 		&self,
-		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
-		txs: &Vec<Transaction>,
+		wallet: &Arc<IntegrationGrinWallet>,
+		txs: &[Transaction],
 		key_id: Option<Identifier>,
 	) -> (Block, BlockFees) {
 		let wallet_retry_interval = 5;
 		// get the latest chain state and build a block on top of it
 		let mut result = self.async_build_block(wallet, txs, key_id.clone()).await;
 		while let Err(e) = result {
-			println!("Error: {:?}", &e);
+			println!("Error: {:?}", e);
 			let mut new_key_id = key_id.to_owned();
 			match e {
 				grin_servers::common::types::Error::Chain(c) => match c {
@@ -167,15 +166,15 @@ impl Miner {
 
 			result = self.async_build_block(wallet, txs, new_key_id).await;
 		}
-		return result.unwrap();
+		result.unwrap()
 	}
 
 	/// Builds a new block with the chain head as previous and eligible
 	/// transactions from the pool.
 	async fn async_build_block(
 		&self,
-		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
-		txs: &Vec<Transaction>,
+		wallet: &Arc<IntegrationGrinWallet>,
+		txs: &[Transaction],
 		key_id: Option<Identifier>,
 	) -> Result<(Block, BlockFees), grin_servers::common::types::Error> {
 		let head = self.chain.head_header()?;
@@ -200,24 +199,21 @@ impl Miner {
 			height,
 		};
 
-		let res = wallet.lock().async_create_coinbase(&block_fees).await?;
+		let res = wallet.async_create_coinbase(&block_fees).await?;
 		let output = res.output;
 		let kernel = res.kernel;
 		let block_fees = BlockFees {
 			key_id: res.key_id,
 			..block_fees
 		};
-		let mut b = Block::from_reward(&head, &txs, output, kernel, difficulty.difficulty)?;
+		let mut b = Block::from_reward(&head, txs, output, kernel, difficulty.difficulty)?;
 
 		// making sure we're not spending time mining a useless block
 		b.validate(&head.total_kernel_offset)?;
 
 		b.header.pow.nonce = thread_rng().gen();
 		b.header.pow.secondary_scaling = difficulty.secondary_scaling;
-		b.header.timestamp = DateTime::<Utc>::from_naive_utc_and_offset(
-			NaiveDateTime::from_timestamp_opt(now_sec, 0).unwrap(),
-			Utc,
-		);
+		b.header.timestamp = DateTime::<Utc>::from_timestamp(now_sec, 0).unwrap();
 
 		debug!(
 			"Built new block with {} inputs and {} outputs, block difficulty: {}, cumulative difficulty {}",
