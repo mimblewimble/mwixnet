@@ -56,7 +56,92 @@ pub struct ServerConfig {
 	pub next_server: Option<MwixnetServerIdentityKey>,
 }
 
+/// Public protocol settings for clients.
+#[derive(Clone, Debug, Serialize)]
+pub struct ServerInfo {
+	pub network: String,
+	pub role: String,
+	pub version: &'static str,
+	pub round_interval_s: Option<u32>,
+	pub minimum_fee: u64,
+	pub uptime_s: u64,
+}
+
+/// Public information available from this server's configuration.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct PublicRoute {
+	pub network: String,
+	pub server: PublicServer,
+	pub next: Option<PublicPeer>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct PublicServer {
+	pub role: String,
+	pub onion_address: String,
+	pub identity_key: String,
+	pub onion_key: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct PublicPeer {
+	pub onion_address: String,
+	pub identity_key: String,
+}
+
 impl ServerConfig {
+	fn network() -> &'static str {
+		match grin_core::global::get_chain_type() {
+			ChainTypes::Mainnet => "mainnet",
+			ChainTypes::Testnet => "testnet",
+			ChainTypes::UserTesting => "user_testing",
+			ChainTypes::AutomatedTesting => "automated_testing",
+		}
+	}
+
+	fn role(&self) -> &'static str {
+		if self.prev_server.is_some() {
+			"mixer"
+		} else {
+			"swap"
+		}
+	}
+
+	pub fn server_info(&self, uptime_s: u64) -> ServerInfo {
+		let swap = self.prev_server.is_none();
+		ServerInfo {
+			network: Self::network().into(),
+			role: self.role().into(),
+			version: env!("CARGO_PKG_VERSION"),
+			uptime_s,
+			round_interval_s: if swap { Some(self.interval_s) } else { None },
+			minimum_fee: grin_core::core::TransactionBody::weight_by_iok(
+				u64::from(swap),
+				u64::from(swap),
+				1,
+			) * grin_core::global::DEFAULT_ACCEPT_FEE_BASE,
+		}
+	}
+
+	pub fn public_route(&self) -> PublicRoute {
+		PublicRoute {
+			network: Self::network().into(),
+			server: PublicServer {
+				role: self.role().into(),
+				onion_address: format!("{}.onion", self.onion_address()),
+				identity_key: self.server_pubkey().to_hex(),
+				onion_key: self.onion_pubkey().to_hex(),
+			},
+			next: self.next_server.as_ref().map(|key| PublicPeer {
+				onion_address: format!(
+					"{}.onion",
+					OnionV3Address::from_bytes(key.as_ref().to_bytes())
+				),
+				identity_key: key.to_hex(),
+			}),
+		}
+	}
+
 	pub fn onion_address(&self) -> OnionV3Address {
 		OnionV3Address::from_private(&self.key.0).unwrap()
 	}
@@ -391,6 +476,46 @@ mod tests {
 	use grin_onion::crypto::secp;
 
 	use super::*;
+
+	#[test]
+	fn public_route() {
+		grin_core::global::set_local_chain_type(ChainTypes::Testnet);
+		let first = secp::random_secret(false);
+		let second = secp::random_secret(false);
+		let swap = test_util::local_config(
+			&first,
+			&None,
+			&Some(MwixnetServerIdentityKey::from_secret(&second)),
+		)
+		.unwrap();
+		let mixer = test_util::local_config(&second, &Some(swap.server_pubkey()), &None).unwrap();
+		let info = swap.server_info(0);
+		assert_eq!(info.network, "testnet");
+		assert_eq!(info.minimum_fee, 12_500_000);
+		assert_eq!(info.round_interval_s, Some(swap.interval_s));
+		assert_eq!(mixer.server_info(0).minimum_fee, 1_500_000);
+		assert_eq!(mixer.server_info(0).round_interval_s, None);
+		let route = swap.public_route();
+		assert_eq!(route.server.role, "swap");
+		assert_eq!(route.server.onion_key, swap.onion_pubkey().to_hex());
+		assert_eq!(
+			route.next.as_ref().unwrap().identity_key,
+			mixer.server_pubkey().to_hex()
+		);
+		assert_eq!(
+			route.next.as_ref().unwrap().onion_address,
+			mixer.public_route().server.onion_address
+		);
+		assert_eq!(mixer.public_route().server.role, "mixer");
+		assert!(mixer.public_route().next.is_none());
+		let value = serde_json::to_value(route).unwrap();
+		assert_eq!(value.as_object().unwrap().len(), 3);
+		assert_eq!(value["server"].as_object().unwrap().len(), 4);
+		assert_eq!(value["next"].as_object().unwrap().len(), 2);
+		let mut changed = swap.clone();
+		changed.next_server = None;
+		assert!(changed.public_route().next.is_none());
+	}
 
 	#[test]
 	fn server_key_encrypt() {

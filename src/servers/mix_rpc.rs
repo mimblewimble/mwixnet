@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::FutureExt;
 use jsonrpc_core::{self, BoxFuture, IoHandler, Value};
@@ -9,7 +10,7 @@ use grin_onion::crypto::dalek::{self, DalekSignature};
 use grin_onion::onion::Onion;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
-use crate::config::ServerConfig;
+use crate::config::{PublicRoute, ServerConfig, ServerInfo};
 use crate::mix_client::MixClient;
 use crate::node::GrinNode;
 use crate::servers::mix::{MixError, MixServer, MixServerImpl};
@@ -38,6 +39,12 @@ impl MixReq {
 
 #[rpc(server)]
 pub trait MixAPI {
+	#[rpc(name = "get_server_info")]
+	fn get_server_info(&self) -> jsonrpc_core::Result<ServerInfo>;
+
+	#[rpc(name = "get_route")]
+	fn get_route(&self) -> jsonrpc_core::Result<PublicRoute>;
+
 	#[rpc(name = "health")]
 	fn health(&self) -> jsonrpc_core::Result<Value>;
 
@@ -47,6 +54,7 @@ pub trait MixAPI {
 
 #[derive(Clone)]
 struct RPCMixServer {
+	started_at: Instant,
 	server_config: ServerConfig,
 	server: Arc<tokio::sync::Mutex<dyn MixServer>>,
 }
@@ -68,6 +76,16 @@ impl From<MixError> for jsonrpc_core::Error {
 }
 
 impl MixAPI for RPCMixServer {
+	fn get_server_info(&self) -> jsonrpc_core::Result<ServerInfo> {
+		Ok(self
+			.server_config
+			.server_info(self.started_at.elapsed().as_secs()))
+	}
+
+	fn get_route(&self) -> jsonrpc_core::Result<PublicRoute> {
+		Ok(self.server_config.public_route())
+	}
+
 	fn health(&self) -> jsonrpc_core::Result<Value> {
 		Ok(Value::String("ok".into()))
 	}
@@ -98,6 +116,7 @@ pub fn listen(
 	let server = Arc::new(tokio::sync::Mutex::new(server));
 
 	let rpc_server = RPCMixServer {
+		started_at: std::time::Instant::now(),
 		server_config: server_config.clone(),
 		server: server.clone(),
 	};
