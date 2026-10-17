@@ -1,32 +1,44 @@
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use arti_client::config::TorClientConfigBuilder;
 use arti_client::{TorClient, TorClientConfig};
-use arti_hyper::ArtiHttpConnector;
+use bytes::Bytes;
 use curve25519_dalek::digest::Digest;
 use ed25519_dalek::hazmat::ExpandedSecretKey;
-use futures::task::SpawnExt;
+use futures::{task::SpawnExt, StreamExt};
+use http_body_util::{BodyExt, Full};
+use hyper::{Request, Uri};
+use hyper_util::rt::TokioIo;
 use sha2::Sha512;
 use thiserror::Error;
-use tls_api::{TlsConnector as TlsConnectorTrait, TlsConnectorBuilder};
-use tls_api_native_tls::TlsConnector;
 use tor_hscrypto::pk::{HsIdKey, HsIdKeypair};
 use tor_hsrproxy::config::{
 	Encapsulation, ProxyAction, ProxyConfigBuilder, ProxyPattern, ProxyRule, TargetAddr,
 };
 use tor_hsrproxy::OnionServiceReverseProxy;
 use tor_hsservice::config::OnionServiceConfigBuilder;
+use tor_hsservice::status::{Problem as OnionServiceProblem, State as OnionServiceState};
 use tor_hsservice::{
-	HsIdKeypairSpecifier, HsIdPublicKeySpecifier, HsNickname, RunningOnionService,
+	HsId, HsIdKeypairSpecifier, HsIdPublicKeySpecifier, HsNickname, RunningOnionService,
 };
 use tor_keymgr::key_specifier_derive::internal;
 use tor_keymgr::{ArtiNativeKeystore, KeyMgrBuilder, KeystoreSelector};
 use tor_llcrypto::pk::ed25519::ExpandedKeypair;
-use tor_rtcompat::Runtime;
+use tor_rtcompat::{Runtime, SleepProviderExt, ToplevelBlockOn};
 
-use secp256k1zkp::SecretKey;
+use grin_util::secp::SecretKey;
 
 use crate::config::ServerConfig;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn set_timeout_floor(config: &mut TorClientConfigBuilder, timeout_ms: i32) {
+	config
+		.override_net_params()
+		.insert("cbtmintimeout".into(), timeout_ms);
+}
 
 /// Tor error types
 #[derive(Error, Debug)]
@@ -35,28 +47,41 @@ pub enum TorError {
 	ConfigError(grin_wallet_impls::Error),
 	#[error("Error starting process: {0:?}")]
 	ProcessError(grin_wallet_impls::tor::process::Error),
+	#[error("Tor request failed: {0}")]
+	RequestError(String),
+	#[error("Tor request timed out")]
+	RequestTimeout,
+	#[error("Tor request returned HTTP status {0}")]
+	ResponseStatusError(hyper::StatusCode),
 }
 
 pub struct TorService<R: Runtime> {
-	tor_client: Option<TorClient<R>>,
-	hidden_services: Vec<Arc<RunningOnionService>>,
+	tor_client: Option<Arc<TorClient<R>>>,
+	hidden_service: Option<Arc<RunningOnionService>>,
+	proxy: Option<Arc<OnionServiceReverseProxy>>,
+	proxy_worker: Option<JoinHandle<()>>,
 }
 
 impl<R: Runtime> TorService<R> {
-	/// Builds a hyper::Client with an ArtiHttpConnector over the TorClient.
-	/// The returned Client makes HTTP requests through the TorClient directly, eliminating the need for a socks proxy.
-	pub fn new_hyper_client(
-		&self,
-	) -> hyper::Client<ArtiHttpConnector<R, TlsConnector>, hyper::Body> {
-		let tls_connector = TlsConnector::builder().unwrap().build().unwrap();
-		let tor_connector = ArtiHttpConnector::new(self.tor_client.clone().unwrap(), tls_connector);
-
-		hyper::Client::builder().build::<_, hyper::Body>(tor_connector)
+	/// Returns the Tor client used for direct asynchronous connections.
+	///
+	/// This replaces the former `new_hyper_client` API.
+	pub fn client(&self) -> Option<Arc<TorClient<R>>> {
+		self.tor_client.clone()
 	}
 
-	pub fn stop(&mut self) {
+	pub fn stop(&mut self) -> Result<(), TorError> {
+		if let Some(proxy) = self.proxy.take() {
+			proxy.shutdown();
+		}
+		self.proxy_worker
+			.take()
+			.map(|worker| worker.join())
+			.transpose()
+			.map_err(|_| TorError::RequestError("Onion proxy thread panicked".into()))?;
+		self.hidden_service = None;
 		self.tor_client = None;
-		self.hidden_services.clear();
+		Ok(())
 	}
 }
 
@@ -66,16 +91,21 @@ pub async fn async_init_tor<R>(
 	server_config: &ServerConfig,
 ) -> Result<TorService<R>, TorError>
 where
-	R: Runtime,
+	R: Runtime + ToplevelBlockOn,
 {
-	warn!("Initializing TOR");
+	info!("Initializing Tor client");
 
 	let state_dir = format!("{}/tor/state", &data_dir);
 	let cache_dir = format!("{}/tor/cache", &data_dir);
-	let hs_nickname = HsNickname::new("listener".to_string()).unwrap();
-
+	let onion_address = server_config.onion_address().to_string();
+	let hs_nickname = HsNickname::new(onion_address.clone())
+		.map_err(|error| TorError::RequestError(format!("Invalid Onion nickname: {error}")))?;
 	let mut client_config_builder =
 		TorClientConfigBuilder::from_directories(state_dir.clone(), cache_dir.clone());
+	set_timeout_floor(
+		&mut client_config_builder,
+		server_config.min_circuit_timeout_ms,
+	);
 	client_config_builder
 		.address_filter()
 		.allow_onion_addrs(true);
@@ -86,13 +116,18 @@ where
 		.config(client_config)
 		.create_bootstrapped()
 		.await
-		.unwrap();
+		.map_err(|error| {
+			TorError::RequestError(format!("Tor bootstrap failed: {}", error_chain(&error)))
+		})?;
 
-	let service =
-		async_launch_hidden_service(hs_nickname.clone(), &tor_client, &server_config).await?;
+	let (service, proxy, proxy_worker) =
+		async_launch_hidden_service(hs_nickname.clone(), &tor_client, server_config).await?;
+	spawn_status_logger(tor_client.runtime(), &service, onion_address)?;
 	let tor_instance = TorService {
 		tor_client: Some(tor_client),
-		hidden_services: vec![service],
+		hidden_service: Some(service),
+		proxy: Some(proxy),
+		proxy_worker: Some(proxy_worker),
 	};
 	Ok(tor_instance)
 }
@@ -101,16 +136,26 @@ async fn async_launch_hidden_service<R>(
 	hs_nickname: HsNickname,
 	tor_client: &TorClient<R>,
 	server_config: &ServerConfig,
-) -> Result<Arc<RunningOnionService>, TorError>
+) -> Result<
+	(
+		Arc<RunningOnionService>,
+		Arc<OnionServiceReverseProxy>,
+		JoinHandle<()>,
+	),
+	TorError,
+>
 where
-	R: Runtime,
+	R: Runtime + ToplevelBlockOn,
 {
 	let svc_cfg = OnionServiceConfigBuilder::default()
 		.nickname(hs_nickname.clone())
 		.build()
 		.unwrap();
 
-	let (service, request_stream) = tor_client.launch_onion_service(svc_cfg).unwrap();
+	let (service, request_stream) = tor_client
+		.launch_onion_service(svc_cfg)
+		.map_err(|error| TorError::RequestError(error_chain(&error)))?
+		.ok_or_else(|| TorError::RequestError("Can not launch onion service".into()))?;
 
 	let proxy_rule = ProxyRule::new(
 		ProxyPattern::one_port(80).unwrap(),
@@ -119,33 +164,171 @@ where
 	let mut proxy_cfg_builder = ProxyConfigBuilder::default();
 	proxy_cfg_builder.set_proxy_ports(vec![proxy_rule]);
 	let proxy = OnionServiceReverseProxy::new(proxy_cfg_builder.build().unwrap());
+	let expected_address = format!("{}.onion", server_config.onion_address().to_ov3_str());
+	let expected_address: HsId = expected_address
+		.parse()
+		.map_err(|error| TorError::RequestError(format!("Invalid Onion identity: {error}")))?;
 
-	{
+	let worker = {
 		let proxy = proxy.clone();
-		let runtime_clone = tor_client.runtime().clone();
-		tor_client
-			.runtime()
-			.spawn(async move {
-				match proxy
-					.handle_requests(runtime_clone, hs_nickname.clone(), request_stream)
-					.await
-				{
-					Ok(()) => {
-						debug!("Onion service {} exited cleanly.", hs_nickname);
-					}
-					Err(e) => {
-						warn!("Onion service {} exited with an error: {}", hs_nickname, e);
+		let runtime = tor_client.runtime().clone();
+		thread::spawn(move || {
+			runtime.clone().block_on(async move {
+				let mut request_stream = request_stream;
+				loop {
+					match proxy
+						.handle_requests(runtime.clone(), hs_nickname.clone(), &mut request_stream)
+						.await
+					{
+						Ok(()) => {
+							debug!("Onion service {} exited cleanly.", hs_nickname);
+							break;
+						}
+						Err(error) => {
+							warn!(
+								"Onion service {} proxy failed: {}; retrying in 1 second",
+								hs_nickname, error
+							);
+							runtime.sleep(Duration::from_secs(1)).await;
+						}
 					}
 				}
-			})
-			.unwrap();
+			});
+		})
+	};
+
+	let launched_address = service
+		.onion_address()
+		.ok_or_else(|| TorError::RequestError("Onion service has no identity".into()))?;
+	if launched_address != expected_address {
+		proxy.shutdown();
+		let _ = worker.join();
+		return Err(TorError::RequestError(format!(
+			"Onion service identity mismatch: expected {}, launched {:?}",
+			server_config.onion_address().to_ov3_str(),
+			launched_address
+		)));
 	}
 
-	warn!(
-		"Server listening at http://{}.onion",
+	info!(
+		"Onion service reactor launched at http://{}.onion",
 		server_config.onion_address().to_ov3_str()
 	);
-	Ok(service)
+	Ok((service, proxy, worker))
+}
+
+const STATUS_WARNING_DELAY: Duration = Duration::from_secs(120);
+const STATUS_WARNING_INTERVAL: Duration = Duration::from_secs(600);
+
+#[derive(Default)]
+struct StatusLog {
+	since: Option<Instant>,
+	last_warning: Option<Instant>,
+	problem: Option<String>,
+	broken: bool,
+}
+
+impl StatusLog {
+	fn update(
+		&mut self,
+		state: OnionServiceState,
+		problem: Option<String>,
+		now: Instant,
+	) -> Option<(log::Level, Duration)> {
+		if matches!(
+			state,
+			OnionServiceState::Running | OnionServiceState::Shutdown
+		) {
+			let recovery = self
+				.last_warning
+				.and_then(|_| self.since)
+				.filter(|_| state == OnionServiceState::Running)
+				.map(|since| (log::Level::Info, now.duration_since(since)));
+			*self = Self::default();
+			return recovery;
+		}
+		if let Some(problem) = problem {
+			self.problem = Some(problem);
+		}
+		// Ignore normal descriptor refreshes
+		if state == OnionServiceState::Bootstrapping
+			&& self.problem.is_none()
+			&& self.since.is_none()
+		{
+			return None;
+		}
+		let elapsed = now.duration_since(*self.since.get_or_insert(now));
+		let broken = state == OnionServiceState::Broken;
+		let report = (broken && !self.broken)
+			|| match self.last_warning {
+				Some(last) => now.duration_since(last) >= STATUS_WARNING_INTERVAL,
+				None => elapsed >= STATUS_WARNING_DELAY,
+			};
+		self.broken = broken;
+		if report {
+			self.last_warning = Some(now);
+			Some((
+				if broken {
+					log::Level::Error
+				} else {
+					log::Level::Warn
+				},
+				elapsed,
+			))
+		} else {
+			None
+		}
+	}
+}
+
+fn spawn_status_logger<R>(
+	runtime: &R,
+	service: &RunningOnionService,
+	onion_address: String,
+) -> Result<(), TorError>
+where
+	R: Runtime,
+{
+	let mut statuses = service.status_events();
+	let mut status = service.status();
+	let timer = runtime.clone();
+	runtime
+		.spawn(async move {
+			let mut monitor = StatusLog::default();
+			loop {
+				let state = status.state();
+				let problem = status.current_problem().and_then(onion_service_problem);
+				if let Some((level, elapsed)) = monitor.update(state, problem, Instant::now()) {
+					if level == log::Level::Info {
+						info!("Onion service recovered after {}s at http://{onion_address}.onion", elapsed.as_secs());
+					} else {
+						log::log!(level, "Onion service reports {state:?} after {}s of problems at http://{onion_address}.onion; latest problem: {}",
+							elapsed.as_secs(), monitor.problem.as_deref().unwrap_or("no details reported"));
+					}
+				}
+				// Keep checking while the status stays unchanged
+				match timer.timeout(Duration::from_secs(30), statuses.next()).await {
+					Ok(Some(next)) => {
+						debug!("Onion service status at http://{onion_address}.onion: {next:?}");
+						status = next;
+					}
+					Ok(None) => break,
+					Err(_) => {}
+				}
+			}
+		})
+		.map_err(|error| {
+			TorError::RequestError(format!("Could not monitor Onion service: {error}"))
+		})?;
+	Ok(())
+}
+
+fn onion_service_problem(problem: &OnionServiceProblem) -> Option<String> {
+	match problem {
+		OnionServiceProblem::DescriptorUpload(errors) if errors.is_empty() => None,
+		OnionServiceProblem::Ipt(errors) if errors.is_empty() => None,
+		_ => Some(format!("{problem:?}")),
+	}
 }
 
 // TODO: Add proper error handling
@@ -157,12 +340,12 @@ fn add_key_to_store(
 ) -> Result<(), TorError> {
 	let key_store_dir = format!("{}/keystore", &state_dir);
 	let arti_store =
-		ArtiNativeKeystore::from_path_and_mistrust(&key_store_dir, &tor_config.fs_mistrust())
+		ArtiNativeKeystore::from_path_and_mistrust(&key_store_dir, tor_config.fs_mistrust())
 			.unwrap();
 	info!("Using keystore from {key_store_dir:?}");
 
 	let key_manager = KeyMgrBuilder::default()
-		.default_store(Box::new(arti_store))
+		.primary_store(Box::new(arti_store))
 		.build()
 		.map_err(|_| internal!("failed to build keymgr"))
 		.unwrap();
@@ -181,9 +364,10 @@ fn add_key_to_store(
 
 	key_manager
 		.insert(
-			HsIdKey::from(expanded_kp.public().clone()),
+			HsIdKey::from(*expanded_kp.public()),
 			&HsIdPublicKeySpecifier::new(hs_nickname.clone()),
-			KeystoreSelector::Default,
+			KeystoreSelector::Primary,
+			true,
 		)
 		.unwrap();
 
@@ -191,9 +375,203 @@ fn add_key_to_store(
 		.insert(
 			HsIdKeypair::from(expanded_kp),
 			&HsIdKeypairSpecifier::new(hs_nickname.clone()),
-			KeystoreSelector::Default,
+			KeystoreSelector::Primary,
+			true,
 		)
 		.unwrap();
 
 	Ok(())
+}
+
+pub async fn async_post<R: Runtime>(
+	client: Arc<TorClient<R>>,
+	url: &str,
+	body: String,
+) -> Result<String, TorError> {
+	async_post_with_timeout(client, url, body, REQUEST_TIMEOUT).await
+}
+
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+	let mut message = error.to_string();
+	let mut source = error.source();
+	while let Some(error) = source {
+		message.push_str(": ");
+		message.push_str(&error.to_string());
+		source = error.source();
+	}
+	message
+}
+
+async fn async_post_with_timeout<R: Runtime>(
+	client: Arc<TorClient<R>>,
+	url: &str,
+	body: String,
+	timeout: Duration,
+) -> Result<String, TorError> {
+	let uri: Uri = url
+		.parse()
+		.map_err(|e| TorError::RequestError(format!("Bad URL: {e}")))?;
+	let host = uri
+		.host()
+		.ok_or_else(|| TorError::RequestError("URL has no host".into()))?
+		.to_string();
+	let request_target = uri
+		.path_and_query()
+		.map(|path| path.as_str())
+		.unwrap_or("/")
+		.to_string();
+	let runtime = client.runtime().clone();
+	runtime
+		.clone()
+		.timeout(timeout, async move {
+			let port = uri.port_u16().unwrap_or(80);
+			let stream = client
+				.connect((host.clone(), port))
+				.await
+				.map_err(|error| TorError::RequestError(error_chain(&error)))?;
+			let (mut sender, connection) =
+				hyper::client::conn::http1::handshake(TokioIo::new(stream))
+					.await
+					.map_err(|error| TorError::RequestError(error_chain(&error)))?;
+
+			let connection_runtime = runtime.clone();
+			connection_runtime
+				.spawn(async move {
+					if let Err(error) = connection.await {
+						warn!("Tor connection error: {}", error_chain(&error));
+					}
+				})
+				.map_err(|error| {
+					TorError::RequestError(format!("Could not start HTTP connection: {error}"))
+				})?;
+
+			let response = sender
+				.send_request(
+					Request::builder()
+						.uri(request_target)
+						.method("POST")
+						.header("host", host)
+						.header("content-type", "application/json")
+						.body::<Full<Bytes>>(Full::from(body))
+						.map_err(|error| TorError::RequestError(error_chain(&error)))?,
+				)
+				.await
+				.map_err(|error| TorError::RequestError(error_chain(&error)))?;
+			if !response.status().is_success() {
+				return Err(TorError::ResponseStatusError(response.status()));
+			}
+			let bytes = response
+				.into_body()
+				.collect()
+				.await
+				.map_err(|error| TorError::RequestError(error_chain(&error)))?
+				.to_bytes();
+			String::from_utf8(bytes.to_vec())
+				.map_err(|error| TorError::RequestError(error_chain(&error)))
+		})
+		.await
+		.map_err(|_| TorError::RequestTimeout)?
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use OnionServiceState::{
+		Bootstrapping, Broken, DegradedReachable, DegradedUnreachable, Recovering, Running,
+		Shutdown,
+	};
+
+	#[test]
+	fn brief_problem() {
+		let mut monitor = StatusLog::default();
+		let now = Instant::now();
+		assert_eq!(monitor.update(Bootstrapping, None, now), None);
+		assert_eq!(monitor.update(Running, None, now), None);
+		assert_eq!(
+			monitor.update(DegradedReachable, Some("upload timeout".into()), now),
+			None
+		);
+		assert_eq!(
+			monitor.update(Running, None, now + Duration::from_secs(60)),
+			None
+		);
+		assert!(monitor.problem.is_none());
+	}
+
+	#[test]
+	fn warning_and_recovery() {
+		let mut monitor = StatusLog::default();
+		let now = Instant::now();
+		let state = DegradedUnreachable;
+		assert_eq!(
+			monitor.update(state, Some("upload timeout".into()), now),
+			None
+		);
+		// Keep the timer across retries
+		assert_eq!(
+			monitor.update(Bootstrapping, None, now + Duration::from_secs(60)),
+			None
+		);
+		assert_eq!(
+			monitor.update(state, None, now + STATUS_WARNING_DELAY),
+			Some((log::Level::Warn, STATUS_WARNING_DELAY))
+		);
+		assert_eq!(monitor.problem.as_deref(), Some("upload timeout"));
+		assert_eq!(
+			monitor.update(state, None, now + Duration::from_secs(150)),
+			None
+		);
+		let repeat = STATUS_WARNING_DELAY + STATUS_WARNING_INTERVAL;
+		assert_eq!(
+			monitor.update(state, None, now + repeat),
+			Some((log::Level::Warn, repeat))
+		);
+		assert_eq!(
+			monitor.update(Running, None, now + repeat),
+			Some((log::Level::Info, repeat))
+		);
+		assert_eq!(monitor.update(Running, None, now + repeat), None);
+	}
+
+	#[test]
+	fn broken_and_shutdown() {
+		let mut monitor = StatusLog::default();
+		let now = Instant::now();
+		assert_eq!(monitor.update(Recovering, None, now), None);
+		assert_eq!(
+			monitor.update(Broken, Some("runtime failure".into()), now),
+			Some((log::Level::Error, Duration::ZERO))
+		);
+		assert_eq!(monitor.update(Broken, None, now), None);
+		assert_eq!(monitor.update(Shutdown, None, now), None);
+		assert!(monitor.since.is_none());
+	}
+
+	#[test]
+	fn retry_without_details() {
+		let mut monitor = StatusLog::default();
+		let now = Instant::now();
+		assert_eq!(monitor.update(Recovering, None, now), None);
+		assert_eq!(
+			monitor.update(Bootstrapping, None, now + STATUS_WARNING_DELAY),
+			Some((log::Level::Warn, STATUS_WARNING_DELAY))
+		);
+	}
+
+	#[test]
+	fn empty_errors() {
+		assert!(onion_service_problem(&OnionServiceProblem::DescriptorUpload(vec![])).is_none());
+		assert!(onion_service_problem(&OnionServiceProblem::Ipt(vec![])).is_none());
+	}
+
+	#[test]
+	fn timeout_floor() {
+		let mut config = TorClientConfigBuilder::default();
+		set_timeout_floor(&mut config, 1_234);
+
+		assert_eq!(
+			config.override_net_params().get("cbtmintimeout"),
+			Some(&1_234)
+		);
+	}
 }

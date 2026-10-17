@@ -20,7 +20,7 @@
 use crate::common::types::BlockFees;
 use crate::common::wallet::IntegrationGrinWallet;
 use chrono::prelude::Utc;
-use chrono::{DateTime, NaiveDateTime};
+use chrono::DateTime;
 use grin_chain::Chain;
 use grin_core::core::hash::{Hash, Hashed};
 use grin_core::core::{Block, BlockHeader, Transaction};
@@ -214,10 +214,7 @@ impl Miner {
 
 		b.header.pow.nonce = thread_rng().gen();
 		b.header.pow.secondary_scaling = difficulty.secondary_scaling;
-		b.header.timestamp = DateTime::<Utc>::from_naive_utc_and_offset(
-			NaiveDateTime::from_timestamp_opt(now_sec, 0).unwrap(),
-			Utc,
-		);
+		b.header.timestamp = DateTime::<Utc>::from_timestamp(now_sec, 0).unwrap();
 
 		debug!(
 			"Built new block with {} inputs and {} outputs, block difficulty: {}, cumulative difficulty {}",

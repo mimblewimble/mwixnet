@@ -1,25 +1,30 @@
 use std::time::Duration;
 
+use bytes::Bytes;
 use grin_api::json_rpc;
 use grin_util::to_base64;
 use grin_wallet_api::{EncryptedRequest, EncryptedResponse, JsonId};
-use hyper::body::Body as HyperBody;
+use http_body_util::{BodyExt, Full};
 use hyper::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use hyper::Request;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use serde_json::json;
 use thiserror::Error;
 
-use secp256k1zkp::SecretKey;
+use grin_util::secp::SecretKey;
 
 /// Error types for HTTP client connections
 #[derive(Error, Debug)]
 pub enum HttpError {
+	#[error("Error loading TLS roots: {0}")]
+	TlsError(std::io::Error),
 	#[error("Error decrypting response")]
 	DecryptResponseError(),
 	#[error("Hyper HTTP error: {0:?}")]
 	HyperHttpError(hyper::http::Error),
 	#[error("Hyper request failed with error: {0:?}")]
-	RequestFailed(hyper::Error),
+	RequestFailed(hyper_util::client::legacy::Error),
 	#[error("Error with response body: {0:?}")]
 	ResponseBodyError(hyper::Error),
 	#[error("Error deserializing JSON response: {0:?}")]
@@ -89,7 +94,7 @@ pub fn build_request(
 	url: &String,
 	api_secret: &Option<String>,
 	req_body: String,
-) -> Result<Request<HyperBody>, HttpError> {
+) -> Result<Request<Full<Bytes>>, HttpError> {
 	let mut req_builder = hyper::Request::builder();
 	if let Some(api_secret) = api_secret {
 		let basic_auth = format!("Basic {}", to_base64(&format!("grin:{}", api_secret)));
@@ -102,26 +107,38 @@ pub fn build_request(
 		.header(USER_AGENT, "grin-client")
 		.header(ACCEPT, "application/json")
 		.header(CONTENT_TYPE, "application/json")
-		.body(HyperBody::from(req_body))
+		.body(Full::from(req_body))
 		.map_err(HttpError::HyperHttpError)
 }
 
-async fn send_request_async(req: Request<HyperBody>) -> Result<String, HttpError> {
-	let client = hyper::Client::builder()
+async fn send_request_async(req: Request<Full<Bytes>>) -> Result<String, HttpError> {
+	let mut client = Client::builder(TokioExecutor::new());
+	client
 		.pool_idle_timeout(Duration::from_secs(30))
-		.build_http();
+		.pool_timer(TokioTimer::new());
 
-	let resp = client
-		.request(req)
-		.await
-		.map_err(HttpError::RequestFailed)?;
+	let resp = if req.uri().scheme_str() == Some("http") {
+		client.build_http::<Full<Bytes>>().request(req).await
+	} else {
+		let https = hyper_rustls::HttpsConnectorBuilder::new()
+			.with_native_roots()
+			.map_err(HttpError::TlsError)?
+			.https_or_http()
+			.enable_http1()
+			.build();
+		client.build::<_, Full<Bytes>>(https).request(req).await
+	}
+	.map_err(HttpError::RequestFailed)?;
 	if !resp.status().is_success() {
 		return Err(HttpError::ResponseStatusError(resp.status()));
 	}
 
-	let raw = hyper::body::to_bytes(resp)
+	let raw = resp
+		.into_body()
+		.collect()
 		.await
-		.map_err(HttpError::ResponseBodyError)?;
+		.map_err(HttpError::ResponseBodyError)?
+		.to_bytes();
 
 	Ok(String::from_utf8_lossy(&raw).to_string())
 }
