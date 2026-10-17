@@ -44,31 +44,21 @@ tor-rtcompat = { version = "0.43.0", features = ["static"] }
 log = "0.4.20"
 tracing = { version = "0.1", features = ["log"] }
 
-grin_api = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_core = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_chain = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_keychain = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_p2p = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_servers = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_store = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_util = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_wallet_api = { git = "https://github.com/wiesche89/grin-wallet", rev = "4f7801f1475263b7b279c84697a9f3faa90f9b4e" }
-grin_wallet_config = { git = "https://github.com/wiesche89/grin-wallet", rev = "4f7801f1475263b7b279c84697a9f3faa90f9b4e" }
-grin_wallet_controller = { git = "https://github.com/wiesche89/grin-wallet", rev = "4f7801f1475263b7b279c84697a9f3faa90f9b4e" }
-grin_wallet_impls = { git = "https://github.com/wiesche89/grin-wallet", rev = "4f7801f1475263b7b279c84697a9f3faa90f9b4e" }
-grin_wallet_libwallet = { git = "https://github.com/wiesche89/grin-wallet", rev = "4f7801f1475263b7b279c84697a9f3faa90f9b4e" }
-grin_wallet_util = { git = "https://github.com/wiesche89/grin-wallet", rev = "4f7801f1475263b7b279c84697a9f3faa90f9b4e" }
+grin_api = { path = "grin-wallet/grin/api" }
+grin_core = { path = "grin-wallet/grin/core" }
+grin_chain = { path = "grin-wallet/grin/chain" }
+grin_keychain = { path = "grin-wallet/grin/keychain" }
+grin_p2p = { path = "grin-wallet/grin/p2p" }
+grin_servers = { path = "grin-wallet/grin/servers" }
+grin_store = { path = "grin-wallet/grin/store" }
+grin_util = { path = "grin-wallet/grin/util" }
+grin_wallet_api = { path = "grin-wallet/api" }
+grin_wallet_config = { path = "grin-wallet/config" }
+grin_wallet_controller = { path = "grin-wallet/controller" }
+grin_wallet_impls = { path = "grin-wallet/impls" }
+grin_wallet_libwallet = { path = "grin-wallet/libwallet" }
+grin_wallet_util = { path = "grin-wallet/util" }
 
 [dev-dependencies]
-grin_wallet_libwallet = { git = "https://github.com/wiesche89/grin-wallet", rev = "4f7801f1475263b7b279c84697a9f3faa90f9b4e", features = ["mwixnet-test"] }
+grin_wallet_libwallet = { path = "grin-wallet/libwallet", features = ["mwixnet-test"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-
-[patch."https://github.com/wiesche89/grin-wallet"]
-grin_api = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_chain = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_core = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_keychain = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_p2p = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_pool = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_store = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
-grin_util = { git = "https://github.com/mimblewimble/grin", rev = "1425f603295ba166eccd9e4e0af0226742f90844" }
