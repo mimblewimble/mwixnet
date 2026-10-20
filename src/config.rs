@@ -21,7 +21,7 @@ const GRIN_HOME: &str = ".grin";
 const NODE_FOREIGN_API_SECRET_FILE_NAME: &str = ".foreign_api_secret";
 const WALLET_OWNER_API_SECRET_FILE_NAME: &str = ".owner_api_secret";
 /// Default minimum Tor circuit build timeout in milliseconds.
-pub const DEFAULT_MIN_CIRCUIT_TIMEOUT_MS: i32 = 2_000;
+pub const DEFAULT_MIN_CIRCUIT_TIMEOUT_MS: i32 = 60_000;
 const CONFIG_HEADER: &str = "\
 # MWixnet server configuration
 # Wallet clients use the ordered X25519 onion keys printed at server startup.
