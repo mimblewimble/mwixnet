@@ -234,7 +234,7 @@ pub mod mock {
 				secp::random_secret(false),
 				None,
 				None,
-			);
+			).expect("failed to generate test bulletproof");
 			let output = Output::new(OutputFeatures::Plain, commit.clone(), proof);
 
 			let mut locked = self.built_outputs.lock().unwrap();
