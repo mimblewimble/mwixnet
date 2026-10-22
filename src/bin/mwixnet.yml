@@ -62,6 +62,15 @@ args:
 subcommands:
   - init-config:
       about: Writes a new configuration file
+  - onion-address:
+      about: Onion address of the server
+      args:
+        - output_file:
+            help: Path to output the address to
+            long: output_file
+            short: o
+            takes_value: true
+            required: false
   - pubkey:
       about: Outputs the Ed25519 identity key of the server
       args:

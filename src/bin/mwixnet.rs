@@ -1,22 +1,22 @@
 #[macro_use]
 extern crate clap;
 
+use clap::App;
+use rand::{thread_rng, Rng};
+use rpassword;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::{sleep, spawn};
 use std::time::Duration;
-
-use clap::App;
-use grin_core::global;
-use grin_core::global::ChainTypes;
-use grin_util::{StopState, ZeroingString};
-use rand::{thread_rng, Rng};
-use rpassword;
 use tor_rtcompat::PreferredRuntime;
 
+use grin_core::global;
+use grin_core::global::ChainTypes;
 use grin_onion::crypto;
 use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
+use grin_util::{StopState, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
+use grin_wallet_util::OnionV3Address;
 use mwixnet::config::{self, ServerConfig};
 use mwixnet::mix_client::{MixClient, MixClientImpl};
 use mwixnet::node::GrinNode;
@@ -149,7 +149,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			min_circuit_timeout_ms: config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
 			data_dir: match data_dir {
 				Some(p) => p.to_owned().replace("\\", "/"),
-				None => config::mwixnet_data_path(&chain_type).to_str().unwrap().to_owned()
+				None => config::mwixnet_data_path(&chain_type)
+					.to_str()
+					.unwrap()
+					.to_owned(),
 			},
 			prev_server,
 			next_server,
@@ -164,6 +167,13 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		return Ok(());
 	}
 
+	if !config_path.exists() {
+		panic!(
+			"No public address configured (Config file not found). {}",
+			config_path.to_string_lossy()
+		);
+	}
+
 	let password = server_password(server_pass_file, false)?;
 	let mut server_config = config::load_config(&config_path, &password)?;
 	if no_fee_collection {
@@ -172,12 +182,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 
 	// Write a new config file if init-config command is supplied
 	if let ("pubkey", Some(_)) = args.subcommand() {
-		if !config_path.exists() {
-			panic!(
-				"No public address configured (Config file not found). {}",
-				config_path.to_string_lossy()
-			);
-		}
 		let sub_args = args.subcommand_matches("pubkey").unwrap();
 		let server_pubkey = server_config.server_pubkey();
 		if sub_args.is_present("output_file") {
@@ -191,13 +195,28 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		return Ok(());
 	}
 
-	if let ("onion-pubkey", Some(_)) = args.subcommand() {
-		if !config_path.exists() {
-			panic!(
-				"No public address configured (Config file not found). {}",
-				config_path.to_string_lossy()
-			);
+	if let ("onion-address", Some(_)) = args.subcommand() {
+		let sub_args = args.subcommand_matches("onion-address").unwrap();
+		let server_pubkey = server_config.server_pubkey();
+		let server_address = match OnionV3Address::try_from(server_pubkey.to_hex().as_str()) {
+			Ok(a) => a.to_ov3_str(),
+			Err(e) => {
+				println!("Can not get onion address from public key: {}", e);
+				return Err(Box::new(e));
+			}
+		};
+		if sub_args.is_present("output_file") {
+			//output server pubkey to file
+			let output_file = sub_args.value_of("output_file").unwrap();
+			std::fs::write(output_file, server_address)?;
+			println!("Server onion address written to file: {}", output_file);
+		} else {
+			println!("{}.onion", server_address);
 		}
+		return Ok(());
+	}
+
+	if let ("onion-pubkey", Some(_)) = args.subcommand() {
 		let sub_args = args.subcommand_matches("onion-pubkey").unwrap();
 		let onion_pubkey = server_config.onion_pubkey();
 		if sub_args.is_present("output_file") {
@@ -291,10 +310,8 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let tor_runtime = rt_handle.block_on(async { PreferredRuntime::current() })?;
 	tor_log_ratelim::install_runtime(tor_runtime.clone())?;
 
-	let tor_instance = rt_handle.block_on(tor::async_init_tor(
-		tor_runtime.clone(),
-		&server_config,
-	))?;
+	let tor_instance =
+		rt_handle.block_on(tor::async_init_tor(tor_runtime.clone(), &server_config))?;
 	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
 	let tor_clone = tor_instance.clone();
 
