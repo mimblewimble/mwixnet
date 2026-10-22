@@ -48,7 +48,7 @@ impl Miner {
 		num_blocks: usize,
 	) {
 		for _ in 0..num_blocks {
-			self.async_mine_next_block(wallet, &vec![]).await;
+			self.async_mine_next_block(wallet, &[]).await;
 		}
 	}
 
@@ -56,7 +56,7 @@ impl Miner {
 	pub async fn async_mine_next_block(
 		&self,
 		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
-		txs: &Vec<Transaction>,
+		txs: &[Transaction],
 	) {
 		info!("Starting test miner loop.");
 
@@ -126,14 +126,14 @@ impl Miner {
 	async fn async_get_block(
 		&self,
 		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
-		txs: &Vec<Transaction>,
+		txs: &[Transaction],
 		key_id: Option<Identifier>,
 	) -> (Block, BlockFees) {
 		let wallet_retry_interval = 5;
 		// get the latest chain state and build a block on top of it
 		let mut result = self.async_build_block(wallet, txs, key_id.clone()).await;
 		while let Err(e) = result {
-			println!("Error: {:?}", &e);
+			println!("Error: {:?}", e);
 			let mut new_key_id = key_id.to_owned();
 			match e {
 				grin_servers::common::types::Error::Chain(c) => match c {
@@ -167,15 +167,16 @@ impl Miner {
 
 			result = self.async_build_block(wallet, txs, new_key_id).await;
 		}
-		return result.unwrap();
+		result.unwrap()
 	}
 
 	/// Builds a new block with the chain head as previous and eligible
 	/// transactions from the pool.
+	#[allow(clippy::await_holding_lock)]
 	async fn async_build_block(
 		&self,
 		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
-		txs: &Vec<Transaction>,
+		txs: &[Transaction],
 		key_id: Option<Identifier>,
 	) -> Result<(Block, BlockFees), grin_servers::common::types::Error> {
 		let head = self.chain.head_header()?;
@@ -207,7 +208,7 @@ impl Miner {
 			key_id: res.key_id,
 			..block_fees
 		};
-		let mut b = Block::from_reward(&head, &txs, output, kernel, difficulty.difficulty)?;
+		let mut b = Block::from_reward(&head, txs, output, kernel, difficulty.difficulty)?;
 
 		// making sure we're not spending time mining a useless block
 		b.validate(&head.total_kernel_offset)?;

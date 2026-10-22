@@ -85,6 +85,9 @@ impl SwapAPI for RPCSwapServer {
 	}
 }
 
+pub type ListenResult =
+	Result<(Arc<tokio::sync::Mutex<dyn SwapServer>>, RpcServer), Box<dyn std::error::Error>>;
+
 /// Spin up the JSON-RPC web server
 pub fn listen(
 	rt_handle: &tokio::runtime::Handle,
@@ -93,10 +96,7 @@ pub fn listen(
 	wallet: Option<Arc<dyn Wallet>>,
 	node: Arc<dyn GrinNode>,
 	store: SwapStore,
-) -> std::result::Result<
-	(Arc<tokio::sync::Mutex<dyn SwapServer>>, RpcServer),
-	Box<dyn std::error::Error>,
-> {
+) -> ListenResult {
 	let server = SwapServerImpl::new(
 		server_config.clone(),
 		next_server,
@@ -222,7 +222,7 @@ mod tests {
 			.enable_all()
 			.build()?;
 		let commitment = secp::commit(1234, &secp::random_secret(false))?;
-		let onion = create_onion(&commitment, &vec![], false)?;
+		let onion = create_onion(&commitment, &[], false)?;
 		let comsig = ComSignature::sign(
 			1234,
 			&secp::random_secret(false),
@@ -275,7 +275,7 @@ mod tests {
 			.build()?;
 
 		let commitment = secp::commit(1234, &secp::random_secret(false))?;
-		let onion = create_onion(&commitment, &vec![], false)?;
+		let onion = create_onion(&commitment, &[], false)?;
 		let comsig = ComSignature::sign(
 			1234,
 			&secp::random_secret(false),
@@ -288,12 +288,7 @@ mod tests {
 		};
 
 		let mut server = MockSwapServer::new();
-		server.set_response(
-			&onion,
-			SwapError::CoinNotFound {
-				commit: commitment.clone(),
-			},
-		);
+		server.set_response(&onion, SwapError::CoinNotFound { commit: commitment });
 		let server: Arc<Mutex<dyn SwapServer>> = Arc::new(Mutex::new(server));
 
 		let req = format!(

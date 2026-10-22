@@ -1,9 +1,4 @@
 use core::num::NonZeroU32;
-use std::fs::File;
-use std::io::prelude::*;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::result::Result;
 use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_util::{file, ToHex, ZeroingString};
@@ -11,11 +6,16 @@ use grin_wallet_util::OnionV3Address;
 use rand::{thread_rng, Rng};
 use ring::{aead, pbkdf2};
 use serde_derive::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::prelude::*;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::result::Result;
 use thiserror::Error;
 
 use grin_onion::crypto::secp::SecretKey;
-use grin_wallet_libwallet::mwixnet::{onion as grin_onion, MwixnetServerPublicKey};
 use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
+use grin_wallet_libwallet::mwixnet::{onion as grin_onion, MwixnetServerPublicKey};
 
 const GRIN_HOME: &str = ".grin";
 const MWIXNET_DATA_DIR: &str = "mwixnet_data";
@@ -218,7 +218,7 @@ impl EncryptedServerKey {
 		let sealing_key: aead::LessSafeKey = aead::LessSafeKey::new(unbound_key);
 		let nonce: [u8; 12] = thread_rng().gen();
 		let aad = aead::Aad::from(&[]);
-		let _ = sealing_key
+		sealing_key
 			.seal_in_place_append_tag(
 				aead::Nonce::assume_unique_for_key(nonce),
 				aad,
@@ -262,7 +262,7 @@ impl EncryptedServerKey {
 				aad,
 				&mut encrypted_seed,
 			)
-			.map_err(|e| ConfigError::DecryptionError(e))?;
+			.map_err(ConfigError::DecryptionError)?;
 
 		for _ in 0..aead::AES_256_GCM.tag_len() {
 			encrypted_seed.pop();
@@ -355,7 +355,7 @@ pub fn write_config(
 	server_config: &ServerConfig,
 	password: &ZeroingString,
 ) -> Result<(), ConfigError> {
-	let encrypted = EncryptedServerKey::from_secret_key(&server_config.key, &password);
+	let encrypted = EncryptedServerKey::from_secret_key(&server_config.key, password);
 
 	let raw_config = RawConfig {
 		encrypted_key: encrypted.encrypted_key,
@@ -375,9 +375,9 @@ pub fn write_config(
 	};
 	let encoded = documented_config(&raw_config)?;
 
-	let mut file = File::create(config_path).map_err(|e| ConfigError::FileWriteError(e))?;
+	let mut file = File::create(config_path).map_err(ConfigError::FileWriteError)?;
 	file.write_all(encoded.as_bytes())
-		.map_err(|e| ConfigError::FileWriteError(e))?;
+		.map_err(ConfigError::FileWriteError)?;
 
 	Ok(())
 }
@@ -395,7 +395,7 @@ pub fn load_config(
 		salt: raw_config.salt,
 		nonce: raw_config.nonce,
 	};
-	let secret_key = encrypted_key.decrypt(&password)?;
+	let secret_key = encrypted_key.decrypt(password)?;
 
 	Ok(ServerConfig {
 		key: secret_key,
@@ -407,14 +407,19 @@ pub fn load_config(
 		wallet_owner_secret_path: raw_config.wallet_owner_secret_path,
 		collect_fees: raw_config.collect_fees,
 		min_circuit_timeout_ms: raw_config.min_circuit_timeout_ms,
-		data_dir: raw_config.data_dir.unwrap_or_else(|| mwixnet_data_path(&global::get_chain_type()).to_str().unwrap().to_string()),
+		data_dir: raw_config.data_dir.unwrap_or_else(|| {
+			mwixnet_data_path(&global::get_chain_type())
+				.to_str()
+				.unwrap()
+				.to_string()
+		}),
 		prev_server: raw_config.prev_server,
 		next_server: raw_config.next_server,
 	})
 }
 
 pub fn get_grin_path(chain_type: &ChainTypes) -> PathBuf {
-	let mut grin_path = dirs::home_dir().unwrap_or_else(|| PathBuf::new());
+	let mut grin_path = dirs::home_dir().unwrap_or_default();
 	grin_path.push(GRIN_HOME);
 	grin_path.push(chain_type.shortname());
 	grin_path
@@ -455,10 +460,10 @@ pub mod test_util {
 	use super::grin_onion;
 	use std::net::TcpListener;
 
+	use crate::config::{ServerConfig, DEFAULT_MIN_CIRCUIT_TIMEOUT_MS};
 	use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
 	use grin_util::secp::SecretKey;
 	use rand::{thread_rng, Rng};
-	use crate::config::{ServerConfig, DEFAULT_MIN_CIRCUIT_TIMEOUT_MS};
 
 	pub fn local_config(
 		server_key: &SecretKey,
@@ -475,7 +480,11 @@ pub mod test_util {
 			wallet_owner_secret_path: None,
 			collect_fees: true,
 			min_circuit_timeout_ms: DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
-			data_dir: std::env::temp_dir().join(format!("mwixnet_data_{}", thread_rng().gen::<u64>())).to_str().unwrap().into(),
+			data_dir: std::env::temp_dir()
+				.join(format!("mwixnet_data_{}", thread_rng().gen::<u64>()))
+				.to_str()
+				.unwrap()
+				.into(),
 			prev_server: prev_server.clone(),
 			next_server: next_server.clone(),
 		};

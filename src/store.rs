@@ -110,10 +110,10 @@ impl Writeable for SwapData {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), ser::Error> {
 		writer.write_u8(CURRENT_SWAP_VERSION)?;
 		writer.write_fixed_bytes(&self.excess)?;
-		writer.write_fixed_bytes(&self.output_commit)?;
+		writer.write_fixed_bytes(self.output_commit)?;
 		write_optional(writer, &self.rangeproof)?;
 		self.input.write(writer)?;
-		writer.write_u64(self.fee.into())?;
+		writer.write_u64(self.fee)?;
 		self.onion.write(writer)?;
 		self.status.write(writer)?;
 
@@ -232,14 +232,14 @@ impl SwapStore {
 		&self,
 		prefix: u8,
 		k: K,
-		value: &Vec<u8>,
+		value: &[u8],
 		overwrite: bool,
 	) -> Result<bool, store::lmdb::Error> {
 		let mut batch = self.db.batch()?;
 		if !overwrite && batch.exists(Some(prefix), k.as_ref())? {
 			Ok(false)
 		} else {
-			batch.put(Some(prefix), k.as_ref(), &value[..])?;
+			batch.put(Some(prefix), k.as_ref(), value)?;
 			batch.commit()?;
 			Ok(true)
 		}
@@ -257,10 +257,10 @@ impl SwapStore {
 	pub fn save_swap(&self, s: &SwapData, overwrite: bool) -> Result<(), StoreError> {
 		let data = ser::ser_vec(&s, ProtocolVersion::local())?;
 		let saved = self
-			.write(SWAP_PREFIX, &s.input.commit, &data, overwrite)
+			.write(SWAP_PREFIX, s.input.commit, &data, overwrite)
 			.map_err(StoreError::WriteError)?;
 		if !saved {
-			Err(StoreError::AlreadyExists(s.input.commit.clone()))
+			Err(StoreError::AlreadyExists(s.input.commit))
 		} else {
 			Ok(())
 		}
@@ -304,7 +304,7 @@ impl SwapStore {
 		let data = ser::ser_vec(&s, ProtocolVersion::local())?;
 		self.write(
 			TX_PREFIX,
-			&s.tx.kernels().first().unwrap().excess,
+			s.tx.kernels().first().unwrap().excess,
 			&data,
 			true,
 		)
@@ -422,10 +422,8 @@ mod tests {
 			}
 		});
 
-		let mut i: usize = 0;
-		for swap in store.swaps_iter()? {
+		for (i, swap) in store.swaps_iter()?.enumerate() {
 			assert_eq!(swap, *swaps.get(i).unwrap());
-			i += 1;
 		}
 
 		Ok(())
@@ -446,10 +444,7 @@ mod tests {
 			kernel_commit: onion_test_util::rand_commit(),
 		};
 		let result = store.save_swap(&swap, false);
-		assert_eq!(
-			Err(StoreError::AlreadyExists(swap.input.commit.clone())),
-			result
-		);
+		assert_eq!(Err(StoreError::AlreadyExists(swap.input.commit)), result);
 
 		store.save_swap(&swap, true)?;
 		assert_eq!(swap, store.get_swap(&swap.input.commit)?);

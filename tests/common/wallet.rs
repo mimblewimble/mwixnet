@@ -7,6 +7,8 @@ use std::time::Duration;
 use grin_core::core::{Output, Transaction, TxKernel};
 use grin_core::global::ChainTypes;
 use grin_keychain::{ExtKeychain, Identifier};
+use grin_util::secp::pedersen::Commitment;
+use grin_util::secp::SecretKey;
 use grin_util::{Mutex, ToHex, ZeroingString};
 use grin_wallet_api::Owner;
 use grin_wallet_config::WalletConfig;
@@ -17,8 +19,6 @@ use grin_wallet_libwallet::{InitTxArgs, Slate, VersionedSlate, WalletInfo, Walle
 use log::error;
 use mwixnet::http;
 use mwixnet::wallet::HttpWallet;
-use grin_util::secp::pedersen::Commitment;
-use grin_util::secp::SecretKey;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -64,11 +64,13 @@ impl IntegrationGrinWallet {
 		// Wallet LifeCycle Provider provides all functions init wallet and work with seeds, etc...
 		let lc = wallet.lc_provider().unwrap();
 
-		let mut wallet_config = WalletConfig::default();
-		wallet_config.check_node_api_http_addr = node_api.clone();
-		wallet_config.owner_api_listen_port = Some(api_listen_port);
-		wallet_config.api_secret_path = None;
-		wallet_config.data_file_dir = wallet_dir.clone();
+		let wallet_config = WalletConfig {
+			check_node_api_http_addr: node_api.clone(),
+			owner_api_listen_port: Some(api_listen_port),
+			api_secret_path: None,
+			data_file_dir: wallet_dir.clone(),
+			..Default::default()
+		};
 
 		// The top level wallet directory should be set manually (in the reference implementation,
 		// this is provided in the WalletConfig)

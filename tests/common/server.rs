@@ -8,14 +8,14 @@ use grin_wallet_libwallet::mwixnet::{MwixnetServerPublicKey, SwapReq};
 use serde_json::json;
 use tor_rtcompat::PreferredRuntime;
 
+use crate::common::node::IntegrationGrinNode;
+use crate::common::wallet::{GrinWalletManager, IntegrationGrinWallet};
+use grin_util::secp::SecretKey;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
+use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
 use mwixnet::mix_client::MixClientImpl;
 use mwixnet::tor::TorService;
 use mwixnet::{tor, SwapError, SwapServer, SwapStore};
-use grin_util::secp::SecretKey;
-use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
-use crate::common::node::IntegrationGrinNode;
-use crate::common::wallet::{GrinWalletManager, IntegrationGrinWallet};
 
 pub struct IntegrationSwapServer<R: tor_rtcompat::Runtime> {
 	onion_pubkey: MwixnetServerPublicKey,
@@ -69,6 +69,7 @@ pub struct IntegrationMixServer<R: tor_rtcompat::Runtime> {
 	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
 }
 
+#[allow(clippy::await_holding_lock)]
 async fn async_new_swap_server<R>(
 	data_dir: &str,
 	rt_handle: &tokio::runtime::Handle,
@@ -98,10 +99,7 @@ where
 		min_circuit_timeout_ms: mwixnet::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
 		data_dir: data_dir.to_string(),
 		prev_server: None,
-		next_server: match next_server {
-			Some(s) => Some(MwixnetServerIdentityKey::from_secret(&s.server_key)),
-			None => None,
-		},
+		next_server: next_server.map(|s| MwixnetServerIdentityKey::from_secret(&s.server_key)),
 	};
 
 	// Open SwapStore
@@ -137,6 +135,8 @@ where
 	}
 }
 
+#[allow(clippy::await_holding_lock)]
+#[allow(clippy::too_many_arguments)]
 async fn async_new_mix_server<R>(
 	data_dir: &str,
 	rt_handle: &tokio::runtime::Handle,
@@ -166,10 +166,7 @@ where
 		min_circuit_timeout_ms: mwixnet::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
 		data_dir: data_dir.to_string(),
 		prev_server: Some(prev_server),
-		next_server: match next_server {
-			Some(s) => Some(MwixnetServerIdentityKey::from_secret(&s.server_key)),
-			None => None,
-		},
+		next_server: next_server.map(|s| MwixnetServerIdentityKey::from_secret(&s.server_key)),
 	};
 
 	let tor_instance = tor::async_init_tor(tor_runtime, &server_config)
@@ -234,7 +231,7 @@ impl Servers {
 				tor_runtime.clone(),
 				wallets,
 				&server_keys[i + 1],
-				&node,
+				node,
 				MwixnetServerIdentityKey::from_secret(&server_keys[i]),
 				mixers.last(),
 			)
@@ -259,7 +256,7 @@ impl Servers {
 			tor_runtime.clone(),
 			wallets,
 			&server_keys[0],
-			&node,
+			node,
 			mixers.first(),
 		)
 		.await;

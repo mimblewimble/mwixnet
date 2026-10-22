@@ -3,7 +3,6 @@ extern crate clap;
 
 use clap::App;
 use rand::{thread_rng, Rng};
-use rpassword;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::{sleep, spawn};
@@ -107,22 +106,18 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let data_dir = args.value_of("data_dir");
 
 	let server_identity = |data: &str| -> MwixnetServerIdentityKey {
-		MwixnetServerIdentityKey::from_hex(data).unwrap_or_else(|_| {
-			match OnionV3Address::try_from(data) {
-				Ok(a) => {
-					let key = a.to_ed25519().unwrap();
-					MwixnetServerIdentityKey::from_hex(key.to_hex().as_str()).unwrap()
-				},
-				Err(e) => panic!("Can not get server key from {}: {}", data, e)
+		MwixnetServerIdentityKey::from_hex(data).unwrap_or_else(|_| match OnionV3Address::try_from(
+			data,
+		) {
+			Ok(a) => {
+				let key = a.to_ed25519().unwrap();
+				MwixnetServerIdentityKey::from_hex(key.to_hex().as_str()).unwrap()
 			}
+			Err(e) => panic!("Can not get server key from {}: {}", data, e),
 		})
 	};
-	let prev_server = args
-		.value_of("prev_server")
-		.map(server_identity);
-	let next_server = args
-		.value_of("next_server")
-		.map(server_identity);
+	let prev_server = args.value_of("prev_server").map(server_identity);
+	let next_server = args.value_of("next_server").map(server_identity);
 
 	println!("p: {:?}, n: {:?}", prev_server, next_server);
 
@@ -201,7 +196,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		if sub_args.is_present("output_file") {
 			//output server pubkey to file
 			let output_file = sub_args.value_of("output_file").unwrap();
-			std::fs::write(output_file, format!("{}", server_pubkey.to_hex()))?;
+			std::fs::write(output_file, server_pubkey.to_hex())?;
 			println!("Server pubkey written to file: {}", output_file);
 		} else {
 			println!("{}", server_pubkey.to_hex());

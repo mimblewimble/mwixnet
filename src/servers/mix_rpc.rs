@@ -104,6 +104,9 @@ impl MixAPI for RPCMixServer {
 	}
 }
 
+pub type ListenResult =
+	Result<(Arc<tokio::sync::Mutex<dyn MixServer>>, RpcServer), Box<dyn std::error::Error>>;
+
 /// Spin up the JSON-RPC web server
 pub fn listen(
 	rt_handle: &tokio::runtime::Handle,
@@ -111,7 +114,7 @@ pub fn listen(
 	next_server: Option<Arc<dyn MixClient>>,
 	wallet: Option<Arc<dyn Wallet>>,
 	node: Arc<dyn GrinNode>,
-) -> Result<(Arc<tokio::sync::Mutex<dyn MixServer>>, RpcServer), Box<dyn std::error::Error>> {
+) -> ListenResult {
 	let server = MixServerImpl::new(server_config.clone(), next_server, wallet, node.clone());
 	let server = Arc::new(tokio::sync::Mutex::new(server));
 

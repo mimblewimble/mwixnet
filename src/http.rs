@@ -48,14 +48,14 @@ pub async fn async_send_enc_request<D: serde::de::DeserializeOwned>(
 		"id": JsonId::IntId(1),
 		"jsonrpc": "2.0",
 	});
-	let enc_req = EncryptedRequest::from_json(&JsonId::IntId(1), &req, &shared_key).unwrap();
-	let req = build_request(&url, &api_secret, serde_json::to_string(&enc_req).unwrap())?;
+	let enc_req = EncryptedRequest::from_json(&JsonId::IntId(1), &req, shared_key).unwrap();
+	let req = build_request(url, api_secret, serde_json::to_string(&enc_req).unwrap())?;
 	let response_str = send_request_async(req).await?;
 	let enc_res: EncryptedResponse =
 		serde_json::from_str(&response_str).map_err(HttpError::ResponseJsonError)?;
 
 	let decrypted = enc_res
-		.decrypt(&shared_key)
+		.decrypt(shared_key)
 		.map_err(|_| HttpError::DecryptResponseError())?;
 
 	let response: json_rpc::Response =
@@ -79,7 +79,7 @@ pub async fn async_send_json_request<D: serde::de::DeserializeOwned>(
 		"id": 1,
 		"jsonrpc": "2.0",
 	});
-	let req = build_request(&url, &api_secret, serde_json::to_string(&req_body).unwrap())?;
+	let req = build_request(url, api_secret, serde_json::to_string(&req_body).unwrap())?;
 	let data = send_request_async(req).await?;
 	let ser: json_rpc::Response =
 		serde_json::from_str(&data).map_err(HttpError::ResponseJsonError)?;

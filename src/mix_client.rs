@@ -40,7 +40,7 @@ pub enum MixClientError {
 #[async_trait]
 pub trait MixClient: Send + Sync {
 	/// Swaps the outputs provided and returns the final swapped outputs and kernels.
-	async fn mix_outputs(&self, onions: &Vec<Onion>) -> Result<MixResp, MixClientError>;
+	async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError>;
 }
 
 pub struct MixClientImpl<R: Runtime> {
@@ -95,11 +95,12 @@ impl<R: Runtime> MixClientImpl<R> {
 
 #[async_trait]
 impl<R: Runtime> MixClient for MixClientImpl<R> {
-	async fn mix_outputs(&self, onions: &Vec<Onion>) -> Result<MixResp, MixClientError> {
+	async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError> {
+		let onions = onions.to_vec();
 		let serialized = ser::ser_vec(&onions, ProtocolVersion::local()).unwrap();
 		let sig =
 			dalek::sign(&self.config.key, serialized.as_slice()).map_err(MixClientError::Dalek)?;
-		let mix = MixReq::new(onions.clone(), sig);
+		let mix = MixReq::new(onions, sig);
 
 		self.async_send_json_request::<MixResp>(&self.addr, "mix", &json!([mix]))
 			.await
@@ -130,14 +131,20 @@ pub mod mock {
 			}
 		}
 
-		pub fn set_response(&mut self, onions: &Vec<Onion>, r: MixResp) {
-			self.results.insert(onions.clone(), r);
+		pub fn set_response(&mut self, onions: &[Onion], r: MixResp) {
+			self.results.insert(onions.to_owned(), r);
+		}
+	}
+
+	impl Default for MockMixClient {
+		fn default() -> Self {
+			Self::new()
 		}
 	}
 
 	#[async_trait]
 	impl MixClient for MockMixClient {
-		async fn mix_outputs(&self, onions: &Vec<Onion>) -> Result<MixResp, MixClientError> {
+		async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError> {
 			self.results
 				.get(onions)
 				.map(|r| Ok(r.clone()))
@@ -176,7 +183,8 @@ pub mod test_util {
 
 	#[async_trait]
 	impl MixClient for DirectMixClient {
-		async fn mix_outputs(&self, onions: &Vec<Onion>) -> Result<MixResp, MixClientError> {
+		async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError> {
+			let onions = onions.to_vec();
 			let serialized = ser::ser_vec(&onions, ProtocolVersion::local()).unwrap();
 			let sig =
 				dalek::sign(&self.key, serialized.as_slice()).map_err(MixClientError::Dalek)?;

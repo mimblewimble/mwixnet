@@ -12,9 +12,9 @@ use thiserror::Error;
 
 use grin_onion::crypto::dalek::{self, DalekSignature};
 use grin_onion::onion::{Onion, OnionError, PeeledOnion};
-use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_util::secp::key::ZERO_KEY;
-use grin_util::secp::Secp256k1;
+use grin_util::secp::{Secp256k1, SecretKey};
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
 use crate::config::ServerConfig;
 use crate::mix_client::MixClient;
@@ -70,7 +70,7 @@ pub trait MixServer: Send + Sync {
 	/// Swaps the outputs provided and returns the final swapped outputs and kernels.
 	async fn mix_outputs(
 		&self,
-		onions: &Vec<Onion>,
+		onions: &[Onion],
 		sig: &DalekSignature,
 	) -> Result<MixResp, MixError>;
 }
@@ -125,7 +125,7 @@ impl MixServerImpl {
 		// Peel the top layer
 		let peeled = onion
 			.peel_layer(&self.server_config.key)
-			.map_err(|e| MixError::PeelOnionFailure(e))?;
+			.map_err(MixError::PeelOnionFailure)?;
 
 		// Verify the fee meets the minimum
 		let fee: u64 = peeled.payload.fee.into();
@@ -151,7 +151,7 @@ impl MixServerImpl {
 
 	async fn async_build_final_outputs(
 		&self,
-		peeled: &Vec<(usize, PeeledOnion)>,
+		peeled: &[(usize, PeeledOnion)],
 	) -> Result<MixResp, MixError> {
 		// Filter out commitments that already exist in the UTXO set
 		let filtered: Vec<&(usize, PeeledOnion)> = stream::iter(peeled.iter())
@@ -176,7 +176,7 @@ impl MixServerImpl {
 			.collect();
 
 		let fees_paid = filtered.iter().map(|(_, p)| p.payload.fee.fee()).sum();
-		let output_excesses = filtered
+		let output_excesses: Vec<SecretKey> = filtered
 			.iter()
 			.map(|(_, p)| p.payload.excess.clone())
 			.collect();
@@ -203,17 +203,14 @@ impl MixServerImpl {
 		})
 	}
 
-	async fn call_next_mixer(
-		&self,
-		peeled: &Vec<(usize, PeeledOnion)>,
-	) -> Result<MixResp, MixError> {
+	async fn call_next_mixer(&self, peeled: &[(usize, PeeledOnion)]) -> Result<MixResp, MixError> {
 		// Sort by commitment
-		let mut onions_with_index = peeled.clone();
+		let mut onions_with_index = peeled.to_vec();
 		onions_with_index
 			.sort_by(|(_, a), (_, b)| a.onion.commit.partial_cmp(&b.onion.commit).unwrap());
 
 		// Call next server
-		let onions = onions_with_index
+		let onions: Vec<Onion> = onions_with_index
 			.iter()
 			.map(|(_, p)| p.onion.clone())
 			.collect();
@@ -230,7 +227,7 @@ impl MixServerImpl {
 		let filtered_onions = filter_by_indices(&onions_with_index, &kept_next_indices);
 
 		// Calculate excess of entries kept
-		let excesses = filtered_onions
+		let excesses: Vec<SecretKey> = filtered_onions
 			.iter()
 			.map(|(_, p)| p.payload.excess.clone())
 			.collect();
@@ -263,11 +260,11 @@ impl MixServerImpl {
 impl MixServer for MixServerImpl {
 	async fn mix_outputs(
 		&self,
-		onions: &Vec<Onion>,
+		onions: &[Onion],
 		sig: &DalekSignature,
 	) -> Result<MixResp, MixError> {
 		// Verify Signature
-		let serialized = ser::ser_vec(&onions, ProtocolVersion::local()).unwrap();
+		let serialized = ser::ser_vec(&onions.to_vec(), ProtocolVersion::local()).unwrap();
 		sig.verify(
 			self.server_config.prev_server.as_ref().unwrap(),
 			serialized.as_slice(),
@@ -278,7 +275,7 @@ impl MixServer for MixServerImpl {
 		let mut peeled: Vec<(usize, PeeledOnion)> = onions
 			.iter()
 			.enumerate()
-			.filter_map(|(i, o)| match self.peel_onion(&o) {
+			.filter_map(|(i, o)| match self.peel_onion(o) {
 				Ok(p) => Some((i, p)),
 				Err(e) => {
 					println!("Error peeling onion: {:?}", e);
@@ -308,14 +305,14 @@ impl MixServer for MixServerImpl {
 mod test_util {
 	use std::sync::Arc;
 
-	use grin_util::secp::SecretKey;
-	use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
 	use crate::config;
 	use crate::mix_client::test_util::DirectMixClient;
 	use crate::mix_client::MixClient;
 	use crate::node::mock::MockGrinNode;
 	use crate::servers::mix::MixServerImpl;
 	use crate::wallet::mock::MockWallet;
+	use grin_util::secp::SecretKey;
+	use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
 
 	pub fn new_mixer(
 		server_key: &SecretKey,
@@ -324,13 +321,13 @@ mod test_util {
 		node: &Arc<MockGrinNode>,
 	) -> (Arc<DirectMixClient>, Arc<MockWallet>) {
 		let config = config::test_util::local_config(
-			&server_key,
+			server_key,
 			&Some(prev_server.1.clone()),
 			&next_server.as_ref().map(|(k, _)| k.clone()),
 		)
 		.unwrap();
 
-		let wallet = Arc::new(MockWallet::new());
+		let wallet = Arc::new(MockWallet::default());
 		let mix_server = Arc::new(MixServerImpl::new(
 			config,
 			next_server.as_ref().map(|(_, c)| c.clone()),
@@ -354,14 +351,14 @@ mod tests {
 
 	use ::function_name::named;
 
+	use crate::mix_client::MixClient;
+	use crate::node::mock::MockGrinNode;
 	use grin_onion::crypto::secp::{self, Commitment};
 	use grin_onion::test_util as onion_test_util;
 	use grin_onion::{create_onion, new_hop, Hop};
 	use grin_util::secp::pedersen::RangeProof;
 	use grin_util::secp::SecretKey;
 	use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
-	use crate::mix_client::MixClient;
-	use crate::node::mock::MockGrinNode;
 
 	macro_rules! init_test {
 		() => {{
@@ -370,7 +367,6 @@ mod tests {
 			);
 			let db_root = concat!("./target/tmp/.", function_name!());
 			let _ = std::fs::remove_dir_all(db_root);
-			()
 		}};
 	}
 
@@ -458,7 +454,7 @@ mod tests {
 		// Create Onion
 		let onion = create_onion(
 			&input1_commit,
-			&vec![
+			&[
 				swap_vars.build_hop(None),
 				mix1_vars.build_hop(None),
 				mix2_vars.build_hop(Some(proof)),
@@ -469,25 +465,25 @@ mod tests {
 		// Simulate the swap server peeling the onion and then calling mix1
 		let mix1_onion = onion.peel_layer(&swap_vars.sk)?;
 		let mixed = mixer1_client
-			.mix_outputs(&vec![mix1_onion.onion.clone()])
+			.mix_outputs(std::slice::from_ref(&mix1_onion.onion))
 			.await?;
 
 		// Verify 3 outputs are returned: mixed output, mixer1's output, and mixer2's output
-		assert_eq!(mixed.indices, vec![0 as usize]);
+		assert_eq!(mixed.indices, vec![0_usize]);
 		assert_eq!(mixed.components.outputs.len(), 3);
 		let output_commits: HashSet<Commitment> = mixed
 			.components
 			.outputs
 			.iter()
-			.map(|o| o.identifier.commit.clone())
+			.map(|o| o.identifier.commit)
 			.collect();
 		assert!(output_commits.contains(&output_commit));
 
 		assert_eq!(mixer1_wallet.built_outputs().len(), 1);
-		assert!(output_commits.contains(mixer1_wallet.built_outputs().get(0).unwrap()));
+		assert!(output_commits.contains(mixer1_wallet.built_outputs().first().unwrap()));
 
 		assert_eq!(mixer2_wallet.built_outputs().len(), 1);
-		assert!(output_commits.contains(mixer2_wallet.built_outputs().get(0).unwrap()));
+		assert!(output_commits.contains(mixer2_wallet.built_outputs().first().unwrap()));
 
 		Ok(())
 	}

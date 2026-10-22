@@ -28,9 +28,11 @@ fn setup_test(test_name: &str) -> (GrinNodeManager, GrinWalletManager, String) {
 	let test_dir = format!("./target/tmp/.{}", test_name);
 	clean_all_output(test_dir.as_str());
 
-	let mut logger = LoggingConfig::default();
-	logger.log_to_file = false;
-	logger.stdout_log_level = Level::Error;
+	let logger = LoggingConfig {
+		log_to_file: false,
+		stdout_log_level: Level::Error,
+		..Default::default()
+	};
 	grin_util::init_logger(Some(logger), None);
 	global::set_local_chain_type(global::ChainTypes::AutomatedTesting);
 	global::set_local_accept_fee_base(50_000_000);
@@ -52,6 +54,7 @@ fn copy_blocks(source: &Chain, target: &Chain, start_height: u64, end_height: u6
 
 #[test]
 #[named]
+#[allow(clippy::await_holding_lock)]
 fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 	let (mut nodes, mut wallets, test_dir) = setup_test(function_name!());
 	let rt = tokio::runtime::Builder::new_multi_thread()
@@ -99,7 +102,7 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 			.await
 			.unwrap();
 		miner
-			.async_mine_next_block(&mining_wallet, &vec![tx1, tx2])
+			.async_mine_next_block(&mining_wallet, &[tx1, tx2])
 			.await;
 		let fork_height = node1_server.chain.head_header().unwrap().height;
 
@@ -146,7 +149,7 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 			.unwrap()
 			.unwrap();
 		miner
-			.async_mine_next_block(&mining_wallet, &vec![tx.as_ref().clone()])
+			.async_mine_next_block(&mining_wallet, &[tx.as_ref().clone()])
 			.await;
 		let user1_wallet_info = user1_wallet
 			.lock()
@@ -157,7 +160,12 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 		assert_eq!(user1_wallet_info.amount_locked, 0);
 
 		// Save the confirmation before the reorg
-		assert!(servers.swapper.async_check_reorg(&tx).await.unwrap().is_some());
+		assert!(servers
+			.swapper
+			.async_check_reorg(&tx)
+			.await
+			.unwrap()
+			.is_some());
 
 		let node2 = nodes.new_node();
 		let node2_server = node2.lock().start();
@@ -186,7 +194,7 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 			.unwrap()
 			.unwrap();
 		miner
-			.async_mine_next_block(&mining_wallet, &vec![tx.as_ref().clone()])
+			.async_mine_next_block(&mining_wallet, &[tx.as_ref().clone()])
 			.await;
 		user1_wallet.lock().async_scan().await.unwrap();
 		let user1_wallet_info = user1_wallet

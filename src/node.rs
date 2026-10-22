@@ -62,7 +62,7 @@ pub async fn async_is_unspent(
 	node: &Arc<dyn GrinNode>,
 	commit: &Commitment,
 ) -> Result<bool, NodeError> {
-	let utxo = node.async_get_utxo(&commit).await?;
+	let utxo = node.async_get_utxo(commit).await?;
 	Ok(utxo.is_some())
 }
 
@@ -72,7 +72,7 @@ pub async fn async_is_spendable(
 	commit: &Commitment,
 	next_block_height: u64,
 ) -> Result<bool, NodeError> {
-	let output = node.async_get_utxo(&commit).await?;
+	let output = node.async_get_utxo(commit).await?;
 	if let Some(out) = output {
 		let is_coinbase = match out.output_type {
 			OutputType::Coinbase => true,
@@ -101,7 +101,7 @@ pub async fn async_build_input(
 	node: &Arc<dyn GrinNode>,
 	output_commit: &Commitment,
 ) -> Result<Option<Input>, NodeError> {
-	let output = node.async_get_utxo(&output_commit).await?;
+	let output = node.async_get_utxo(output_commit).await?;
 
 	if let Some(out) = output {
 		let features = match out.output_type {
@@ -122,13 +122,13 @@ pub async fn async_is_tx_valid(
 ) -> Result<bool, NodeError> {
 	let next_block_height = node.async_get_chain_tip().await?.0 + 1;
 	for input_commit in &tx.inputs_committed() {
-		if !async_is_spendable(&node, &input_commit, next_block_height).await? {
+		if !async_is_spendable(node, input_commit, next_block_height).await? {
 			return Ok(false);
 		}
 	}
 
 	for output_commit in &tx.outputs_committed() {
-		if async_is_unspent(&node, &output_commit).await? {
+		if async_is_unspent(node, output_commit).await? {
 			return Ok(false);
 		}
 	}
@@ -165,7 +165,7 @@ impl HttpGrinNode {
 	) -> Result<D, NodeError> {
 		let url = format!("{}{}", self.node_url, ENDPOINT);
 		let parsed =
-			http::async_send_json_request(&url, &self.node_foreign_api_secret, &method, &params)
+			http::async_send_json_request(&url, &self.node_foreign_api_secret, method, params)
 				.await
 				.map_err(NodeError::NodeCommError)?;
 		Ok(parsed)
@@ -294,7 +294,7 @@ pub mod mock {
 		}
 
 		pub fn add_utxo(&mut self, output_commit: &Commitment, utxo: &OutputPrintable) {
-			self.utxos.insert(output_commit.clone(), utxo.clone());
+			self.utxos.insert(*output_commit, utxo.clone());
 		}
 
 		pub fn add_default_utxo(&mut self, output_commit: &Commitment) {
@@ -309,7 +309,7 @@ pub mod mock {
 				mmr_index: 0,
 			};
 
-			self.add_utxo(&output_commit, &utxo);
+			self.add_utxo(output_commit, &utxo);
 		}
 
 		pub fn get_posted_txns(&self) -> Vec<Transaction> {
@@ -320,8 +320,13 @@ pub mod mock {
 		pub fn add_kernel(&mut self, kernel: &LocatedTxKernel) {
 			self.tip.0 = self.tip.0.max(kernel.height);
 			self.headers.entry(kernel.height).or_default();
-			self.kernels
-				.insert(kernel.tx_kernel.excess.clone(), kernel.clone());
+			self.kernels.insert(kernel.tx_kernel.excess, kernel.clone());
+		}
+	}
+
+	impl Default for MockGrinNode {
+		fn default() -> Self {
+			Self::new()
 		}
 	}
 
@@ -331,7 +336,7 @@ pub mod mock {
 			&self,
 			output_commit: &Commitment,
 		) -> Result<Option<OutputPrintable>, NodeError> {
-			if let Some(utxo) = self.utxos.get(&output_commit) {
+			if let Some(utxo) = self.utxos.get(output_commit) {
 				return Ok(Some(utxo.clone()));
 			}
 
@@ -362,7 +367,7 @@ pub mod mock {
 			_max_height: Option<u64>,
 		) -> Result<Option<LocatedTxKernel>, NodeError> {
 			*self.kernel_lookups.write().unwrap() += 1;
-			if let Some(kernel) = self.kernels.get(&excess) {
+			if let Some(kernel) = self.kernels.get(excess) {
 				return Ok(Some(kernel.clone()));
 			}
 
