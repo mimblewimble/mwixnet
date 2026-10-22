@@ -14,7 +14,7 @@ use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_onion::crypto;
 use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
-use grin_util::{StopState, ZeroingString};
+use grin_util::{StopState, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_wallet_util::OnionV3Address;
 use mwixnet::config::{self, ServerConfig};
@@ -105,12 +105,26 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let wallet_owner_secret_path = args.value_of("wallet_owner_secret_path");
 	let no_fee_collection = args.is_present("no_fee_collection");
 	let data_dir = args.value_of("data_dir");
+
+	let server_identity = |data: &str| -> MwixnetServerIdentityKey {
+		MwixnetServerIdentityKey::from_hex(data).unwrap_or_else(|_| {
+			match OnionV3Address::try_from(data) {
+				Ok(a) => {
+					let key = a.to_ed25519().unwrap();
+					MwixnetServerIdentityKey::from_hex(key.to_hex().as_str()).unwrap()
+				},
+				Err(e) => panic!("Can not get server key from {}: {}", data, e)
+			}
+		})
+	};
 	let prev_server = args
 		.value_of("prev_server")
-		.map(|p| MwixnetServerIdentityKey::from_hex(&p).unwrap());
+		.map(server_identity);
 	let next_server = args
 		.value_of("next_server")
-		.map(|p| MwixnetServerIdentityKey::from_hex(&p).unwrap());
+		.map(server_identity);
+
+	println!("p: {:?}, n: {:?}", prev_server, next_server);
 
 	// Write a new config file if init-config command is supplied
 	if let ("init-config", Some(_)) = args.subcommand() {
@@ -201,8 +215,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		let server_address = match OnionV3Address::try_from(server_pubkey.to_hex().as_str()) {
 			Ok(a) => a.to_ov3_str(),
 			Err(e) => {
-				println!("Can not get onion address from public key: {}", e);
-				return Err(Box::new(e));
+				panic!("Can not get onion address from public key: {}", e);
 			}
 		};
 		if sub_args.is_present("output_file") {

@@ -52,11 +52,11 @@ args:
       long: bind_addr
       takes_value: true
   - prev_server:
-      help: Hex Ed25519 identity key of the previous swap/mix server
+      help: Hex Ed25519 identity key or .onion address of the previous swap/mix server
       long: prev_server
       takes_value: true
   - next_server:
-      help: Hex Ed25519 identity key of the next mix server
+      help: Hex Ed25519 identity key or .onion address of the next mix server
       long: next_server
       takes_value: true
 subcommands:
