@@ -22,7 +22,6 @@ use mwixnet::mix_client::{MixClient, MixClientImpl};
 use mwixnet::node::GrinNode;
 use mwixnet::node::HttpGrinNode;
 use mwixnet::servers;
-use mwixnet::store::StoreError;
 use mwixnet::store::SwapStore;
 use mwixnet::tor;
 use mwixnet::wallet::{HttpWallet, Wallet};
@@ -105,6 +104,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let wallet_owner_url = args.value_of("wallet_owner_url");
 	let wallet_owner_secret_path = args.value_of("wallet_owner_secret_path");
 	let no_fee_collection = args.is_present("no_fee_collection");
+	let data_dir = args.value_of("data_dir");
 	let prev_server = args
 		.value_of("prev_server")
 		.map(|p| MwixnetServerIdentityKey::from_hex(&p).unwrap());
@@ -147,6 +147,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			},
 			collect_fees: !no_fee_collection,
 			min_circuit_timeout_ms: config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
+			data_dir: match data_dir {
+				Some(p) => p.to_owned().replace("\\", "/"),
+				None => config::mwixnet_data_path(&chain_type).to_str().unwrap().to_owned()
+			},
 			prev_server,
 			next_server,
 		};
@@ -209,6 +213,11 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	// Override grin_node_url, if supplied
 	if let Some(grin_node_url) = grin_node_url {
 		server_config.grin_node_url = grin_node_url.parse()?;
+	}
+
+	// Override data_dir, if supplied
+	if let Some(path) = data_dir {
+		server_config.data_dir = path.to_owned().replace("\\", "/");
 	}
 
 	// Override grin_node_foreign_api_secret_path, if supplied
@@ -282,13 +291,8 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let tor_runtime = rt_handle.block_on(async { PreferredRuntime::current() })?;
 	tor_log_ratelim::install_runtime(tor_runtime.clone())?;
 
-	let tor_data_dir = config::get_grin_path(&chain_type)
-		.to_str()
-		.ok_or("Invalid Tor data directory")?
-		.to_owned();
 	let tor_instance = rt_handle.block_on(tor::async_init_tor(
 		tor_runtime.clone(),
-		&tor_data_dir,
 		&server_config,
 	))?;
 	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
@@ -352,14 +356,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		);
 
 		// Open SwapStore
-		let store = SwapStore::new(
-			config::get_grin_path(&chain_type)
-				.join("db")
-				.to_str()
-				.ok_or(StoreError::OpenError(grin_store::lmdb::Error::FileErr(
-					"db_root path error".to_string(),
-				)))?,
-		)?;
+		let store = SwapStore::new(server_config.data_dir.as_str())?;
 
 		// Start the mwixnet JSON-RPC HTTP 'swap' server
 		let (swap_server, http_server) = servers::swap_rpc::listen(

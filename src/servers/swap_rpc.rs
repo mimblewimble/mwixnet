@@ -159,6 +159,7 @@ mod tests {
 			wallet_owner_secret_path: None,
 			collect_fees: true,
 			min_circuit_timeout_ms: crate::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
+			data_dir: "".to_string(),
 			prev_server: None,
 			next_server: None,
 		};

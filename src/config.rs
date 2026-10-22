@@ -4,7 +4,7 @@ use std::io::prelude::*;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::result::Result;
-
+use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_util::{file, ToHex, ZeroingString};
 use grin_wallet_util::OnionV3Address;
@@ -18,6 +18,7 @@ use grin_wallet_libwallet::mwixnet::{onion as grin_onion, MwixnetServerPublicKey
 use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
 
 const GRIN_HOME: &str = ".grin";
+const MWIXNET_DATA_DIR: &str = "mwixnet_data";
 const NODE_FOREIGN_API_SECRET_FILE_NAME: &str = ".foreign_api_secret";
 const WALLET_OWNER_API_SECRET_FILE_NAME: &str = ".owner_api_secret";
 /// Default minimum Tor circuit build timeout in milliseconds.
@@ -48,6 +49,8 @@ pub struct ServerConfig {
 	pub collect_fees: bool,
 	/// minimum Tor circuit build timeout in milliseconds
 	pub min_circuit_timeout_ms: i32,
+	/// The directory in which mwixnet data files are stored
+	pub data_dir: String,
 	/// Ed25519 identity key of the previous mix/swap server (e.g. N_1 if this is N_2)
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	pub prev_server: Option<MwixnetServerIdentityKey>,
@@ -286,6 +289,7 @@ struct RawConfig {
 	wallet_owner_secret_path: Option<String>,
 	collect_fees: bool,
 	min_circuit_timeout_ms: i32,
+	data_dir: Option<String>,
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	prev_server: Option<MwixnetServerIdentityKey>,
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
@@ -365,6 +369,7 @@ pub fn write_config(
 		wallet_owner_secret_path: server_config.wallet_owner_secret_path.clone(),
 		collect_fees: server_config.collect_fees,
 		min_circuit_timeout_ms: server_config.min_circuit_timeout_ms,
+		data_dir: Some(server_config.data_dir.clone()),
 		prev_server: server_config.prev_server.clone(),
 		next_server: server_config.next_server.clone(),
 	};
@@ -402,6 +407,7 @@ pub fn load_config(
 		wallet_owner_secret_path: raw_config.wallet_owner_secret_path,
 		collect_fees: raw_config.collect_fees,
 		min_circuit_timeout_ms: raw_config.min_circuit_timeout_ms,
+		data_dir: raw_config.data_dir.unwrap_or_else(|| mwixnet_data_path(&global::get_chain_type()).to_str().unwrap().to_string()),
 		prev_server: raw_config.prev_server,
 		next_server: raw_config.next_server,
 	})
@@ -426,6 +432,12 @@ pub fn wallet_owner_secret_path(chain_type: &ChainTypes) -> PathBuf {
 	path
 }
 
+pub fn mwixnet_data_path(chain_type: &ChainTypes) -> PathBuf {
+	let mut path = get_grin_path(chain_type);
+	path.push(MWIXNET_DATA_DIR);
+	path
+}
+
 pub fn grin_node_url(chain_type: &ChainTypes) -> String {
 	if *chain_type == ChainTypes::Testnet {
 		"127.0.0.1:13413".into()
@@ -445,7 +457,7 @@ pub mod test_util {
 
 	use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
 	use grin_util::secp::SecretKey;
-
+	use rand::{thread_rng, Rng};
 	use crate::config::{ServerConfig, DEFAULT_MIN_CIRCUIT_TIMEOUT_MS};
 
 	pub fn local_config(
@@ -463,6 +475,7 @@ pub mod test_util {
 			wallet_owner_secret_path: None,
 			collect_fees: true,
 			min_circuit_timeout_ms: DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
+			data_dir: std::env::temp_dir().join(format!("mwixnet_data_{}", thread_rng().gen::<u64>())).to_str().unwrap().into(),
 			prev_server: prev_server.clone(),
 			next_server: next_server.clone(),
 		};

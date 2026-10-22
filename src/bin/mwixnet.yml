@@ -8,6 +8,11 @@ args:
       short: c
       long: config_file
       takes_value: true
+  - data_dir:
+      help: Directory in which data files are stored
+      short: d
+      long: data_dir
+      takes_value: true
   - testnet:
       help: Run grin against the Testnet (as opposed to mainnet)
       long: testnet
