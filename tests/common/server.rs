@@ -96,6 +96,7 @@ where
 		wallet_owner_secret_path: None,
 		collect_fees: true,
 		min_circuit_timeout_ms: mwixnet::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
+		data_dir: data_dir.to_string(),
 		prev_server: None,
 		next_server: match next_server {
 			Some(s) => Some(MwixnetServerIdentityKey::from_secret(&s.server_key)),
@@ -104,8 +105,8 @@ where
 	};
 
 	// Open SwapStore
-	let store = SwapStore::new(format!("{}/db", data_dir).as_str()).unwrap();
-	let tor_instance = tor::async_init_tor(tor_runtime, &data_dir, &server_config)
+	let store = SwapStore::new(data_dir).unwrap();
+	let tor_instance = tor::async_init_tor(tor_runtime, &server_config)
 		.await
 		.unwrap();
 	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
@@ -163,6 +164,7 @@ where
 		wallet_owner_secret_path: None,
 		collect_fees: true,
 		min_circuit_timeout_ms: mwixnet::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
+		data_dir: data_dir.to_string(),
 		prev_server: Some(prev_server),
 		next_server: match next_server {
 			Some(s) => Some(MwixnetServerIdentityKey::from_secret(&s.server_key)),
@@ -170,7 +172,7 @@ where
 		},
 	};
 
-	let tor_instance = tor::async_init_tor(tor_runtime, &data_dir, &server_config)
+	let tor_instance = tor::async_init_tor(tor_runtime, &server_config)
 		.await
 		.unwrap();
 	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
