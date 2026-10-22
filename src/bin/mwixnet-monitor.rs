@@ -14,7 +14,6 @@
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-
 use arti_client::{config::TorClientConfigBuilder, TorClient};
 use clap::{load_yaml, App, Error, ErrorKind};
 use futures::future::join_all;
@@ -22,6 +21,8 @@ use mwixnet::tor::async_post;
 use serde_json::{json, Value};
 use tor_hsservice::HsId;
 use tor_rtcompat::PreferredRuntime;
+
+use grin_wallet_config::config::GRIN_HOME;
 
 fn target(value: &str) -> Result<(String, String), String> {
 	let (name, address) = value.split_once('=').ok_or("Expected NAME=ADDRESS.onion")?;
@@ -52,7 +53,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		.map(|value| target(value).map_err(|error| format!("Invalid target '{value}': {error}")))
 		.collect::<Result<_, _>>()
 		.unwrap_or_else(|error| Error::with_description(&error, ErrorKind::ValueValidation).exit());
-	let data_dir = PathBuf::from(args.value_of("data-dir").unwrap());
+	let data_dir = match args.value_of("data-dir") {
+		Some(value) => PathBuf::from(value),
+		None => {
+			let mut grin_path = dirs::home_dir().unwrap_or_else(|| PathBuf::new());
+			grin_path.push(GRIN_HOME);
+			grin_path.push("mwixnet-monitor");
+			grin_path
+		}
+	};
 	let mut config =
 		TorClientConfigBuilder::from_directories(data_dir.join("state"), data_dir.join("cache"));
 	config.address_filter().allow_onion_addrs(true);
