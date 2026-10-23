@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use grin_core::core::{Output, OutputFeatures, TransactionBody};
+use grin_core::core::{Output, OutputFeatures};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
 use grin_core::ser;
 use grin_core::ser::ProtocolVersion;
@@ -111,7 +111,7 @@ impl MixServerImpl {
 	/// Minimum fee to perform a mix.
 	/// Requires enough fee for the mixer's kernel.
 	fn get_minimum_mix_fee(&self) -> u64 {
-		TransactionBody::weight_by_iok(0, 0, 1) * self.get_fee_base()
+		tx::minimum_hop_fee(false)
 	}
 
 	fn peel_onion(&self, onion: &Onion) -> Result<PeeledOnion, MixError> {

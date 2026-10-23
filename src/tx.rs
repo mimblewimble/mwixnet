@@ -43,6 +43,12 @@ pub struct TxComponents {
 	pub outputs: Vec<Output>,
 }
 
+pub(crate) fn minimum_hop_fee(is_swap: bool) -> u64 {
+	let io_count = u64::from(is_swap);
+	TransactionBody::weight_by_iok(io_count, io_count, 1)
+		* grin_core::global::DEFAULT_ACCEPT_FEE_BASE
+}
+
 /// Builds and verifies the finalized swap 'Transaction' using the provided components.
 #[allow(clippy::too_many_arguments)]
 pub async fn async_assemble_tx(

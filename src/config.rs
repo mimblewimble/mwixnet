@@ -118,11 +118,7 @@ impl ServerConfig {
 			version: env!("CARGO_PKG_VERSION"),
 			uptime_s,
 			round_interval_s: if swap { Some(self.interval_s) } else { None },
-			minimum_fee: grin_core::core::TransactionBody::weight_by_iok(
-				u64::from(swap),
-				u64::from(swap),
-				1,
-			) * grin_core::global::DEFAULT_ACCEPT_FEE_BASE,
+			minimum_fee: crate::tx::minimum_hop_fee(swap),
 		}
 	}
 

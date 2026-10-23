@@ -3,7 +3,7 @@ use std::result::Result;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use grin_core::core::{Committed, Input, Output, OutputFeatures, Transaction, TransactionBody};
+use grin_core::core::{Committed, Input, Output, OutputFeatures, Transaction};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
 use grin_util::secp::key::ZERO_KEY;
 use grin_util::ToHex;
@@ -132,7 +132,7 @@ impl SwapServerImpl {
 	/// Minimum fee to perform a swap.
 	/// Requires enough fee for the swap server's kernel, 1 input and its output to swap.
 	fn get_minimum_swap_fee(&self) -> u64 {
-		TransactionBody::weight_by_iok(1, 1, 1) * self.get_fee_base()
+		tx::minimum_hop_fee(true)
 	}
 
 	async fn async_is_spendable(&self, next_block_height: u64, swap: &SwapData) -> bool {
