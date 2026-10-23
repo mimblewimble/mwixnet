@@ -33,7 +33,7 @@ Check onion reachability every two minutes and log response times
 
 ```sh
 cargo run --release --bin mwixnet-monitor -- \
-  --data-dir "$HOME/.local/share/mwixnet-monitor" \
+  --data_dir "$HOME/.local/share/mwixnet-monitor" \
   swap=mza3u6vkqodqc6kjjapfbcjrg7hgpkuw6nyq5xvfjqp5jm2lfeaocwqd.onion \
   mixer=56bkem4ly7oebmtw7y5d25veoi4t47txqvxlptsy7kctsfid6ekgsuqd.onion
 ```

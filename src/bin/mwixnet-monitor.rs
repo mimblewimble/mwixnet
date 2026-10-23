@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		.map(|value| target(value).map_err(|error| format!("Invalid target '{value}': {error}")))
 		.collect::<Result<_, _>>()
 		.unwrap_or_else(|error| Error::with_description(&error, ErrorKind::ValueValidation).exit());
-	let data_dir = match args.value_of("data-dir") {
+	let data_dir = match args.value_of("data_dir") {
 		Some(value) => PathBuf::from(value),
 		None => {
 			let mut grin_path = dirs::home_dir().unwrap_or_default();
