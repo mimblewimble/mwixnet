@@ -40,6 +40,9 @@ impl RpcServer {
 		io: IoHandler,
 		runtime: Handle,
 	) -> Result<Self, grin_api::Error> {
+		if addr.port() == 0 {
+			return Err(grin_api::Error::Argument("RPC port must be nonzero".into()));
+		}
 		let handler = Arc::new(RpcHandler {
 			io: Arc::new(io),
 			runtime,
