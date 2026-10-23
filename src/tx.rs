@@ -4,9 +4,9 @@ use grin_core::core::{
 	FeeFields, Input, Inputs, KernelFeatures, Output, Transaction, TransactionBody, TxKernel,
 };
 use grin_keychain::BlindingFactor;
-use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::secp;
-use secp256k1zkp::{ContextFlag, Secp256k1, SecretKey};
+use grin_util::secp::{ContextFlag, Secp256k1, SecretKey};
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -15,19 +15,19 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum TxError {
 	#[error("Error computing transactions's offset: {0:?}")]
-	OffsetError(secp256k1zkp::Error),
+	OffsetError(grin_util::secp::Error),
 	#[error("Error building kernel's fee fields: {0:?}")]
 	KernelFeeError(grin_core::core::transaction::Error),
 	#[error("Error computing kernel's excess: {0:?}")]
-	KernelExcessError(secp256k1zkp::Error),
+	KernelExcessError(grin_util::secp::Error),
 	#[error("Error computing kernel's signature message: {0:?}")]
 	KernelSigMessageError(grin_core::core::transaction::Error),
 	#[error("Error signing kernel: {0:?}")]
-	KernelSigError(secp256k1zkp::Error),
+	KernelSigError(grin_util::secp::Error),
 	#[error("Built kernel failed to verify: {0:?}")]
 	KernelVerifyError(grin_core::core::transaction::Error),
 	#[error("Output blinding factor is invalid: {0:?}")]
-	OutputBlindError(secp256k1zkp::Error),
+	OutputBlindError(grin_util::secp::Error),
 	#[error("Wallet error: {0:?}")]
 	WalletError(crate::wallet::WalletError),
 }
@@ -43,30 +43,37 @@ pub struct TxComponents {
 	pub outputs: Vec<Output>,
 }
 
+pub fn minimum_hop_fee(is_swap: bool) -> u64 {
+	let io_count = u64::from(is_swap);
+	TransactionBody::weight_by_iok(io_count, io_count, 1)
+		* grin_core::global::DEFAULT_ACCEPT_FEE_BASE
+}
+
 /// Builds and verifies the finalized swap 'Transaction' using the provided components.
+#[allow(clippy::too_many_arguments)]
 pub async fn async_assemble_tx(
-	wallet: &Arc<dyn Wallet>,
+	wallet: Option<&Arc<dyn Wallet>>,
 	inputs: &Vec<Input>,
-	outputs: &Vec<Output>,
-	kernels: &Vec<TxKernel>,
+	outputs: &[Output],
+	kernels: &[TxKernel],
 	fee_base: u64,
 	fees_paid: u64,
 	prev_offset: &SecretKey,
-	output_excesses: &Vec<SecretKey>,
+	output_excesses: &[SecretKey],
 ) -> Result<Transaction, TxError> {
 	// calculate minimum fee required for the kernel
 	let min_kernel_fee =
 		TransactionBody::weight_by_iok(inputs.len() as u64, outputs.len() as u64, 1) * fee_base;
 
 	let components = async_add_kernel_and_collect_fees(
-		&wallet,
-		&outputs,
-		&kernels,
+		wallet,
+		outputs,
+		kernels,
 		fee_base,
 		min_kernel_fee,
 		fees_paid,
-		&prev_offset,
-		&output_excesses,
+		prev_offset,
+		output_excesses,
 	)
 	.await?;
 
@@ -82,9 +89,9 @@ pub async fn async_assemble_tx(
 
 /// Adds a kernel and output to a collection of transaction components to consume fees and offset excesses.
 pub async fn async_assemble_components(
-	wallet: &Arc<dyn Wallet>,
+	wallet: Option<&Arc<dyn Wallet>>,
 	components: &TxComponents,
-	output_excesses: &Vec<SecretKey>,
+	output_excesses: &[SecretKey],
 	fee_base: u64,
 	fees_paid: u64,
 ) -> Result<TxComponents, TxError> {
@@ -92,32 +99,33 @@ pub async fn async_assemble_components(
 	let min_kernel_fee = TransactionBody::weight_by_iok(0, 0, 1) * fee_base;
 
 	async_add_kernel_and_collect_fees(
-		&wallet,
+		wallet,
 		&components.outputs,
 		&components.kernels,
 		fee_base,
 		min_kernel_fee,
 		fees_paid,
 		&components.offset,
-		&output_excesses,
+		output_excesses,
 	)
 	.await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn async_add_kernel_and_collect_fees(
-	wallet: &Arc<dyn Wallet>,
-	outputs: &Vec<Output>,
-	kernels: &Vec<TxKernel>,
+	wallet: Option<&Arc<dyn Wallet>>,
+	outputs: &[Output],
+	kernels: &[TxKernel],
 	fee_base: u64,
 	min_kernel_fee: u64,
 	fees_paid: u64,
 	prev_offset: &SecretKey,
-	output_excesses: &Vec<SecretKey>,
+	output_excesses: &[SecretKey],
 ) -> Result<TxComponents, TxError> {
 	let secp = Secp256k1::with_caps(ContextFlag::Commit);
-	let mut txn_outputs = outputs.clone();
-	let mut txn_excesses = output_excesses.clone();
-	let mut txn_kernels = kernels.clone();
+	let mut txn_outputs = outputs.to_vec();
+	let mut txn_excesses = output_excesses.to_vec();
+	let mut txn_kernels = kernels.to_vec();
 	let mut kernel_fee = fees_paid;
 
 	// calculate fee required if we add our own output
@@ -127,23 +135,25 @@ async fn async_add_kernel_and_collect_fees(
 	let fee_to_spend = TransactionBody::weight_by_iok(1, 0, 0) * fee_base;
 
 	// collect any leftover fees
-	if fees_paid > min_kernel_fee + fee_to_collect + fee_to_spend {
-		let amount = fees_paid - (min_kernel_fee + fee_to_collect);
-		kernel_fee -= amount;
+	if let Some(wallet) = wallet {
+		if fees_paid > min_kernel_fee + fee_to_collect + fee_to_spend {
+			let amount = fees_paid - (min_kernel_fee + fee_to_collect);
+			kernel_fee -= amount;
 
-		let wallet_output = wallet
-			.async_build_output(amount)
-			.await
-			.map_err(TxError::WalletError)?;
-		txn_outputs.push(wallet_output.1);
+			let wallet_output = wallet
+				.async_build_output(amount)
+				.await
+				.map_err(TxError::WalletError)?;
+			txn_outputs.push(wallet_output.1);
 
-		let output_excess = SecretKey::from_slice(&secp, &wallet_output.0.as_ref())
-			.map_err(TxError::OutputBlindError)?;
-		txn_excesses.push(output_excess);
+			let output_excess = SecretKey::from_slice(&secp, wallet_output.0.as_ref())
+				.map_err(TxError::OutputBlindError)?;
+			txn_excesses.push(output_excess);
+		}
 	}
 
 	// generate random transaction offset
-	let our_offset = secp::random_secret();
+	let our_offset = secp::random_secret(false);
 	let txn_offset = secp
 		.blind_sum(vec![prev_offset.clone(), our_offset.clone()], Vec::new())
 		.map_err(TxError::OffsetError)?;
@@ -183,10 +193,8 @@ async fn async_add_kernel_and_collect_fees(
 /// # Arguments
 ///
 /// * `excess`: A reference to a `SecretKey`. This key is used as an excess value for the transaction.
-///    The excess is a kind of cryptographic proof that the total sum of outputs and fees equals the
-///    total sum of inputs.
-/// * `fee`: An unsigned 64-bit integer representing the transaction fee in nanogrin. This is the fee
-///    that will be paid to the miner who mines the block containing this transaction.
+///   The excess is a kind of cryptographic proof that the total sum of outputs and fees equals the total sum of inputs.
+/// * `fee`: An unsigned 64-bit integer representing the transaction fee in nanogrin. This is the fee that will be paid to the miner who mines the block containing this transaction.
 ///
 /// # Returns
 ///
@@ -207,13 +215,16 @@ async fn async_add_kernel_and_collect_fees(
 /// # Example
 ///
 /// ```rust
-/// use secp256k1zkp::key::SecretKey;
-/// use secp256k1zkp::rand::thread_rng;
-/// use grin_onion::crypto::secp;
+/// use mwixnet::tx::build_kernel;
+/// use grin_util::secp::{ContextFlag, Secp256k1};
+/// use grin_util::secp::key::SecretKey;
+/// use grin_util::secp::rand::thread_rng;
 ///
-/// let secret_key = secp::random_secret();
-/// let fee = 10; // 10 nanogrin
-/// let kernel = mwixnet::tx::build_kernel(&secret_key, fee);
+/// let secp = Secp256k1::with_caps(ContextFlag::None);
+/// let secret_key = SecretKey::new(&secp, &mut thread_rng());
+/// let kernel = build_kernel(&secret_key, 10);
+///
+/// assert!(kernel.is_ok());
 /// ```
 pub fn build_kernel(excess: &SecretKey, fee: u64) -> Result<TxKernel, TxError> {
 	let mut kernel = TxKernel::with_features(KernelFeatures::Plain {
@@ -222,9 +233,35 @@ pub fn build_kernel(excess: &SecretKey, fee: u64) -> Result<TxKernel, TxError> {
 	let msg = kernel
 		.msg_to_sign()
 		.map_err(TxError::KernelSigMessageError)?;
-	kernel.excess = secp::commit(0, &excess).map_err(TxError::KernelExcessError)?;
-	kernel.excess_sig = secp::sign(&excess, &msg).map_err(TxError::KernelSigError)?;
+	kernel.excess = secp::commit(0, excess).map_err(TxError::KernelExcessError)?;
+	kernel.excess_sig = secp::sign(excess, &msg).map_err(TxError::KernelSigError)?;
 	kernel.verify().map_err(TxError::KernelVerifyError)?;
 
 	Ok(kernel)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn no_wallet_keeps_kernel_fee() {
+		let components = TxComponents {
+			offset: secp::random_secret(false),
+			kernels: Vec::new(),
+			outputs: Vec::new(),
+		};
+		let fees_paid = 1_000;
+
+		let result = async_assemble_components(None, &components, &Vec::new(), 1, fees_paid)
+			.await
+			.unwrap();
+
+		assert!(result.outputs.is_empty());
+		assert_eq!(result.kernels.len(), 1);
+		match result.kernels[0].features {
+			KernelFeatures::Plain { fee } => assert_eq!(fee.fee(), fees_paid),
+			_ => panic!("expected plain kernel"),
+		}
+	}
 }

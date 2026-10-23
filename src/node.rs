@@ -1,19 +1,17 @@
-use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use grin_api::LocatedTxKernel;
 use grin_api::{OutputPrintable, OutputType, Tip};
-use grin_core::consensus::COINBASE_MATURITY;
 use grin_core::core::hash::Hash;
 use grin_core::core::{Committed, Input, OutputFeatures, Transaction};
+use grin_core::global;
 use grin_util::ToHex;
 use serde_json::json;
 use thiserror::Error;
 
-use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_onion::crypto::secp::Commitment;
+use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
 use crate::http;
 
@@ -27,6 +25,9 @@ pub trait GrinNode: Send + Sync {
 
 	/// Gets the height and hash of the chain tip
 	async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError>;
+
+	/// Gets the active block hash at a height
+	async fn async_get_header_hash(&self, height: u64) -> Result<Hash, NodeError>;
 
 	/// Posts a transaction to the grin node
 	async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError>;
@@ -61,7 +62,7 @@ pub async fn async_is_unspent(
 	node: &Arc<dyn GrinNode>,
 	commit: &Commitment,
 ) -> Result<bool, NodeError> {
-	let utxo = node.async_get_utxo(&commit).await?;
+	let utxo = node.async_get_utxo(commit).await?;
 	Ok(utxo.is_some())
 }
 
@@ -71,7 +72,7 @@ pub async fn async_is_spendable(
 	commit: &Commitment,
 	next_block_height: u64,
 ) -> Result<bool, NodeError> {
-	let output = node.async_get_utxo(&commit).await?;
+	let output = node.async_get_utxo(commit).await?;
 	if let Some(out) = output {
 		let is_coinbase = match out.output_type {
 			OutputType::Coinbase => true,
@@ -80,7 +81,8 @@ pub async fn async_is_spendable(
 
 		if is_coinbase {
 			if let Some(block_height) = out.block_height {
-				if block_height + COINBASE_MATURITY < next_block_height {
+				let maturity = global::coinbase_maturity();
+				if next_block_height < maturity || block_height > next_block_height - maturity {
 					return Ok(false);
 				}
 			} else {
@@ -99,7 +101,7 @@ pub async fn async_build_input(
 	node: &Arc<dyn GrinNode>,
 	output_commit: &Commitment,
 ) -> Result<Option<Input>, NodeError> {
-	let output = node.async_get_utxo(&output_commit).await?;
+	let output = node.async_get_utxo(output_commit).await?;
 
 	if let Some(out) = output {
 		let features = match out.output_type {
@@ -120,13 +122,13 @@ pub async fn async_is_tx_valid(
 ) -> Result<bool, NodeError> {
 	let next_block_height = node.async_get_chain_tip().await?.0 + 1;
 	for input_commit in &tx.inputs_committed() {
-		if !async_is_spendable(&node, &input_commit, next_block_height).await? {
+		if !async_is_spendable(node, input_commit, next_block_height).await? {
 			return Ok(false);
 		}
 	}
 
 	for output_commit in &tx.outputs_committed() {
-		if async_is_unspent(&node, &output_commit).await? {
+		if async_is_unspent(node, output_commit).await? {
 			return Ok(false);
 		}
 	}
@@ -137,19 +139,22 @@ pub async fn async_is_tx_valid(
 /// HTTP (JSON-RPC) implementation of the 'GrinNode' trait
 #[derive(Clone)]
 pub struct HttpGrinNode {
-	node_url: SocketAddr,
-	node_api_secret: Option<String>,
+	node_url: String,
+	node_foreign_api_secret: Option<String>,
 }
 
 const ENDPOINT: &str = "/v2/foreign";
 
 impl HttpGrinNode {
-	pub fn new(node_url: &str, node_api_secret: &Option<String>) -> HttpGrinNode {
-		let mut addrs_iter = node_url.to_socket_addrs().unwrap();
-		let node_url = addrs_iter.next().unwrap();
+	pub fn new(node_url: &str, node_foreign_api_secret: &Option<String>) -> HttpGrinNode {
+		let node_url = if node_url.starts_with("http://") || node_url.starts_with("https://") {
+			node_url.trim_end_matches('/').to_owned()
+		} else {
+			format!("http://{}", node_url.trim_end_matches('/'))
+		};
 		HttpGrinNode {
 			node_url,
-			node_api_secret: node_api_secret.to_owned(),
+			node_foreign_api_secret: node_foreign_api_secret.to_owned(),
 		}
 	}
 
@@ -158,10 +163,11 @@ impl HttpGrinNode {
 		method: &str,
 		params: &serde_json::Value,
 	) -> Result<D, NodeError> {
-		let url = format!("http://{}{}", self.node_url, ENDPOINT);
-		let parsed = http::async_send_json_request(&url, &self.node_api_secret, &method, &params)
-			.await
-			.map_err(NodeError::NodeCommError)?;
+		let url = format!("{}{}", self.node_url, ENDPOINT);
+		let parsed =
+			http::async_send_json_request(&url, &self.node_foreign_api_secret, method, params)
+				.await
+				.map_err(NodeError::NodeCommError)?;
 		Ok(parsed)
 	}
 }
@@ -209,6 +215,15 @@ impl GrinNode for HttpGrinNode {
 		))
 	}
 
+	async fn async_get_header_hash(&self, height: u64) -> Result<Hash, NodeError> {
+		let params = json!([height, null, null]);
+		let header: grin_api::BlockHeaderPrintable =
+			self.async_send_request("get_header", &params).await?;
+		Hash::from_hex(&header.hash).map_err(|error| {
+			NodeError::ApiCommError(grin_api::Error::ResponseError(error.to_string()))
+		})
+	}
+
 	async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError> {
 		let params = json!([tx, true]);
 		self.async_send_request::<serde_json::Value>("push_transaction", &params)
@@ -223,23 +238,36 @@ impl GrinNode for HttpGrinNode {
 		max_height: Option<u64>,
 	) -> Result<Option<LocatedTxKernel>, NodeError> {
 		let params = json!([excess.0.as_ref().to_hex(), min_height, max_height]);
-		let value = self
-			.async_send_request::<serde_json::Value>("get_kernel", &params)
-			.await?;
-
-		let contents = format!("{:?}", value);
-		if contents.contains("NotFound") {
-			return Ok(None);
+		let url = format!("{}{}", self.node_url, ENDPOINT);
+		let response = http::async_send_json_rpc_request(
+			&url,
+			&self.node_foreign_api_secret,
+			"get_kernel",
+			&params,
+		)
+		.await
+		.map_err(NodeError::NodeCommError)?;
+		if let Some(error) = response.error {
+			return Err(NodeError::ResponseParseError(
+				grin_api::json_rpc::Error::Rpc(error),
+			));
 		}
 
-		let located_kernel = serde_json::from_value::<LocatedTxKernel>(value)
-			.map_err(NodeError::DecodeResponseError)?;
-		Ok(Some(located_kernel))
+		match serde_json::from_value::<Result<LocatedTxKernel, grin_api::Error>>(
+			response.result.unwrap_or(serde_json::Value::Null),
+		)
+		.map_err(NodeError::DecodeResponseError)?
+		{
+			Ok(kernel) => Ok(Some(kernel)),
+			Err(grin_api::Error::NotFound) => Ok(None),
+			Err(error) => Err(NodeError::ApiCommError(error)),
+		}
 	}
 }
 
 #[cfg(test)]
 pub mod mock {
+	use super::grin_onion;
 	use std::collections::HashMap;
 	use std::sync::RwLock;
 
@@ -258,6 +286,9 @@ pub mod mock {
 		utxos: HashMap<Commitment, OutputPrintable>,
 		txns_posted: RwLock<Vec<Transaction>>,
 		kernels: HashMap<Commitment, LocatedTxKernel>,
+		pub tip: (u64, Hash),
+		pub headers: HashMap<u64, Hash>,
+		pub kernel_lookups: RwLock<usize>,
 	}
 
 	impl MockGrinNode {
@@ -266,15 +297,14 @@ pub mod mock {
 				utxos: HashMap::new(),
 				txns_posted: RwLock::new(Vec::new()),
 				kernels: HashMap::new(),
+				tip: (100, Hash::default()),
+				headers: HashMap::new(),
+				kernel_lookups: RwLock::new(0),
 			}
 		}
 
 		pub fn new_with_utxos(utxos: &Vec<&Commitment>) -> Self {
-			let mut node = MockGrinNode {
-				utxos: HashMap::new(),
-				txns_posted: RwLock::new(Vec::new()),
-				kernels: HashMap::new(),
-			};
+			let mut node = Self::new();
 			for utxo in utxos {
 				node.add_default_utxo(utxo);
 			}
@@ -282,7 +312,7 @@ pub mod mock {
 		}
 
 		pub fn add_utxo(&mut self, output_commit: &Commitment, utxo: &OutputPrintable) {
-			self.utxos.insert(output_commit.clone(), utxo.clone());
+			self.utxos.insert(*output_commit, utxo.clone());
 		}
 
 		pub fn add_default_utxo(&mut self, output_commit: &Commitment) {
@@ -297,7 +327,7 @@ pub mod mock {
 				mmr_index: 0,
 			};
 
-			self.add_utxo(&output_commit, &utxo);
+			self.add_utxo(output_commit, &utxo);
 		}
 
 		pub fn get_posted_txns(&self) -> Vec<Transaction> {
@@ -306,8 +336,15 @@ pub mod mock {
 		}
 
 		pub fn add_kernel(&mut self, kernel: &LocatedTxKernel) {
-			self.kernels
-				.insert(kernel.tx_kernel.excess.clone(), kernel.clone());
+			self.tip.0 = self.tip.0.max(kernel.height);
+			self.headers.entry(kernel.height).or_default();
+			self.kernels.insert(kernel.tx_kernel.excess, kernel.clone());
+		}
+	}
+
+	impl Default for MockGrinNode {
+		fn default() -> Self {
+			Self::new()
 		}
 	}
 
@@ -317,7 +354,7 @@ pub mod mock {
 			&self,
 			output_commit: &Commitment,
 		) -> Result<Option<OutputPrintable>, NodeError> {
-			if let Some(utxo) = self.utxos.get(&output_commit) {
+			if let Some(utxo) = self.utxos.get(output_commit) {
 				return Ok(Some(utxo.clone()));
 			}
 
@@ -325,7 +362,14 @@ pub mod mock {
 		}
 
 		async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError> {
-			Ok((100, Hash::default()))
+			Ok(self.tip)
+		}
+
+		async fn async_get_header_hash(&self, height: u64) -> Result<Hash, NodeError> {
+			self.headers
+				.get(&height)
+				.copied()
+				.ok_or_else(|| NodeError::ApiCommError(grin_api::Error::NotFound))
 		}
 
 		async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError> {
@@ -340,11 +384,78 @@ pub mod mock {
 			_min_height: Option<u64>,
 			_max_height: Option<u64>,
 		) -> Result<Option<LocatedTxKernel>, NodeError> {
-			if let Some(kernel) = self.kernels.get(&excess) {
+			*self.kernel_lookups.write().unwrap() += 1;
+			if let Some(kernel) = self.kernels.get(excess) {
 				return Ok(Some(kernel.clone()));
 			}
 
 			Ok(None)
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{async_is_spendable, mock::MockGrinNode, GrinNode, HttpGrinNode};
+	use std::sync::Arc;
+
+	use grin_api::{OutputPrintable, OutputType};
+	use grin_core::global::{self, ChainTypes};
+	use grin_util::secp::pedersen::Commitment;
+
+	#[tokio::test]
+	async fn coinbase_maturity() {
+		for chain_type in [
+			ChainTypes::Mainnet,
+			ChainTypes::Testnet,
+			ChainTypes::AutomatedTesting,
+		] {
+			global::set_local_chain_type(chain_type);
+			let maturity = global::coinbase_maturity();
+			let commit = Commitment::from_vec(vec![0; 33]);
+			let mut mock = MockGrinNode::new();
+			mock.add_utxo(
+				&commit,
+				&OutputPrintable {
+					output_type: OutputType::Coinbase,
+					commit,
+					spent: false,
+					proof: None,
+					proof_hash: String::new(),
+					block_height: Some(10),
+					merkle_proof: None,
+					mmr_index: 0,
+				},
+			);
+			let node: Arc<dyn GrinNode> = Arc::new(mock);
+			for (height, expected) in [
+				(0, false),
+				(10 + maturity - 1, false),
+				(10 + maturity, true),
+				(10 + maturity + 1, true),
+			] {
+				assert_eq!(
+					async_is_spendable(&node, &commit, height).await.unwrap(),
+					expected,
+					"chain {chain_type:?}, height {height}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn node_url_supports_http_and_https() {
+		assert_eq!(
+			HttpGrinNode::new("127.0.0.1:13413", &None).node_url,
+			"http://127.0.0.1:13413"
+		);
+		assert_eq!(
+			HttpGrinNode::new("http://node-test:13413/", &None).node_url,
+			"http://node-test:13413"
+		);
+		assert_eq!(
+			HttpGrinNode::new("https://testnet.grinffindor.org/", &None).node_url,
+			"https://testnet.grinffindor.org"
+		);
 	}
 }
