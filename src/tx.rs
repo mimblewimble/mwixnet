@@ -43,7 +43,7 @@ pub struct TxComponents {
 	pub outputs: Vec<Output>,
 }
 
-pub(crate) fn minimum_hop_fee(is_swap: bool) -> u64 {
+pub fn minimum_hop_fee(is_swap: bool) -> u64 {
 	let io_count = u64::from(is_swap);
 	TransactionBody::weight_by_iok(io_count, io_count, 1)
 		* grin_core::global::DEFAULT_ACCEPT_FEE_BASE
