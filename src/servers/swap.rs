@@ -114,6 +114,7 @@ impl SwapServerImpl {
 		node: Arc<dyn GrinNode>,
 		store: SwapStore,
 	) -> Self {
+		let wallet = wallet.filter(|_| server_config.collect_fees);
 		SwapServerImpl {
 			server_config,
 			next_server,

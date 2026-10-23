@@ -93,6 +93,7 @@ impl MixServerImpl {
 		wallet: Option<Arc<dyn Wallet>>,
 		node: Arc<dyn GrinNode>,
 	) -> Self {
+		let wallet = wallet.filter(|_| server_config.collect_fees);
 		MixServerImpl {
 			secp: Secp256k1::new(),
 			server_config,
