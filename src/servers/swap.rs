@@ -366,12 +366,9 @@ impl SwapServer for SwapServerImpl {
 	async fn check_pending(&self) -> Result<(), SwapError> {
 		let swaps = self.store.lock().await.swaps_iter()?;
 		let kernels: HashSet<_> = swaps
-			.filter_map(|swap| {
-				println!("check pending: {:?}", swap.clone());
-				match swap.status {
-					SwapStatus::InProcess { kernel_commit } => Some(kernel_commit),
-					_ => None,
-				}
+			.filter_map(|swap| match swap.status {
+				SwapStatus::InProcess { kernel_commit } => Some(kernel_commit),
+				_ => None,
 			})
 			.collect();
 
