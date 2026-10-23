@@ -599,9 +599,10 @@ mod tests {
 		assert!(contents.contains(
 			"# Collect excess hop fees in the wallet; false pays all hop fees to miners.\ncollect_fees ="
 		));
-		assert!(contents.contains(
-			"# Minimum Tor circuit build timeout in milliseconds.\nmin_circuit_timeout_ms = 2000"
-		));
+		assert!(contents.contains(&format!(
+			"# Minimum Tor circuit build timeout in milliseconds.\nmin_circuit_timeout_ms = {}",
+			DEFAULT_MIN_CIRCUIT_TIMEOUT_MS
+		)));
 		assert!(contents.contains(
 			"# Previous server Ed25519 identity key; setting it makes this server a mixer.\n# prev_server ="
 		));

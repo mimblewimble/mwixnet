@@ -119,8 +119,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let prev_server = args.value_of("prev_server").map(server_identity);
 	let next_server = args.value_of("next_server").map(server_identity);
 
-	println!("p: {:?}, n: {:?}", prev_server, next_server);
-
 	// Write a new config file if init-config command is supplied
 	if let ("init-config", Some(_)) = args.subcommand() {
 		if config_path.exists() {
@@ -206,20 +204,13 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 
 	if let ("onion-address", Some(_)) = args.subcommand() {
 		let sub_args = args.subcommand_matches("onion-address").unwrap();
-		let server_pubkey = server_config.server_pubkey();
-		let server_address = match OnionV3Address::try_from(server_pubkey.to_hex().as_str()) {
-			Ok(a) => a.to_ov3_str(),
-			Err(e) => {
-				panic!("Can not get onion address from public key: {}", e);
-			}
-		};
+		let server_address = format!("{}.onion", server_config.onion_address());
 		if sub_args.is_present("output_file") {
-			//output server pubkey to file
 			let output_file = sub_args.value_of("output_file").unwrap();
 			std::fs::write(output_file, server_address)?;
 			println!("Server onion address written to file: {}", output_file);
 		} else {
-			println!("{}.onion", server_address);
+			println!("{}", server_address);
 		}
 		return Ok(());
 	}
