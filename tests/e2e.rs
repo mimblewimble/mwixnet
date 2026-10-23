@@ -54,7 +54,6 @@ fn copy_blocks(source: &Chain, target: &Chain, start_height: u64, end_height: u6
 
 #[test]
 #[named]
-#[allow(clippy::await_holding_lock)]
 fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 	let (mut nodes, mut wallets, test_dir) = setup_test(function_name!());
 	let rt = tokio::runtime::Builder::new_multi_thread()
@@ -92,13 +91,11 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 
 		// Send from mining_wallet to user1_wallet
 		let tx1 = mining_wallet
-			.lock()
-			.async_send(user1_wallet.lock().deref(), 10_000_000_000)
+			.async_send(user1_wallet.deref(), 10_000_000_000)
 			.await
 			.unwrap();
 		let tx2 = mining_wallet
-			.lock()
-			.async_send(user2_wallet.lock().deref(), 20_000_000_000)
+			.async_send(user2_wallet.deref(), 20_000_000_000)
 			.await
 			.unwrap();
 		miner
@@ -106,16 +103,14 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 			.await;
 		let fork_height = node1_server.chain.head_header().unwrap().height;
 
-		let user1_km = user1_wallet.lock().keychain_mask();
+		let user1_km = user1_wallet.keychain_mask();
 		let (_, outputs) = user1_wallet
-			.lock()
 			.owner_api()
 			.retrieve_outputs(user1_km.as_ref(), false, true, None)
 			.unwrap();
 		assert_eq!(outputs.len(), 1);
 		for output in &outputs {
 			let creation = user1_wallet
-				.lock()
 				.async_create_mwixnet_req(&output.commit, &servers.get_server_keys())
 				.await
 				.unwrap();
@@ -123,23 +118,11 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 			servers.swapper.async_swap(&creation.request).await.unwrap();
 		}
 
-		let mining_wallet_info = mining_wallet
-			.lock()
-			.async_retrieve_summary_info()
-			.await
-			.unwrap();
+		let mining_wallet_info = mining_wallet.async_retrieve_summary_info().await.unwrap();
 		println!("Mining wallet: {:?}", mining_wallet_info);
-		let user1_wallet_info = user1_wallet
-			.lock()
-			.async_retrieve_summary_info()
-			.await
-			.unwrap();
+		let user1_wallet_info = user1_wallet.async_retrieve_summary_info().await.unwrap();
 		println!("User1 wallet: {:?}", user1_wallet_info);
-		let user2_wallet_info = user2_wallet
-			.lock()
-			.async_retrieve_summary_info()
-			.await
-			.unwrap();
+		let user2_wallet_info = user2_wallet.async_retrieve_summary_info().await.unwrap();
 		println!("User2 wallet: {:?}", user2_wallet_info);
 
 		let tx = servers
@@ -151,11 +134,7 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 		miner
 			.async_mine_next_block(&mining_wallet, &[tx.as_ref().clone()])
 			.await;
-		let user1_wallet_info = user1_wallet
-			.lock()
-			.async_retrieve_summary_info()
-			.await
-			.unwrap();
+		let user1_wallet_info = user1_wallet.async_retrieve_summary_info().await.unwrap();
 		assert_eq!(user1_wallet_info.amount_currently_spendable, 9_850_000_000);
 		assert_eq!(user1_wallet_info.amount_locked, 0);
 
@@ -178,12 +157,8 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 			fork_height + 1,
 			fork_height + 2,
 		);
-		user1_wallet.lock().async_scan().await.unwrap();
-		let user1_wallet_info = user1_wallet
-			.lock()
-			.async_retrieve_summary_info()
-			.await
-			.unwrap();
+		user1_wallet.async_scan().await.unwrap();
+		let user1_wallet_info = user1_wallet.async_retrieve_summary_info().await.unwrap();
 		assert_eq!(user1_wallet_info.amount_currently_spendable, 10_000_000_000);
 		assert_eq!(user1_wallet_info.amount_locked, 0);
 
@@ -196,12 +171,8 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 		miner
 			.async_mine_next_block(&mining_wallet, &[tx.as_ref().clone()])
 			.await;
-		user1_wallet.lock().async_scan().await.unwrap();
-		let user1_wallet_info = user1_wallet
-			.lock()
-			.async_retrieve_summary_info()
-			.await
-			.unwrap();
+		user1_wallet.async_scan().await.unwrap();
+		let user1_wallet_info = user1_wallet.async_retrieve_summary_info().await.unwrap();
 		assert_eq!(user1_wallet_info.amount_currently_spendable, 9_850_000_000);
 		assert_eq!(user1_wallet_info.amount_locked, 0);
 	});

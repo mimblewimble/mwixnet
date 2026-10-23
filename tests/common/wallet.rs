@@ -321,7 +321,7 @@ pub struct GrinWalletManager {
 	// base directory for the server instance
 	working_dir: String,
 
-	wallets: Vec<Arc<Mutex<IntegrationGrinWallet>>>,
+	wallets: Vec<Arc<IntegrationGrinWallet>>,
 }
 
 impl GrinWalletManager {
@@ -335,16 +335,16 @@ impl GrinWalletManager {
 	pub async fn async_new_wallet(
 		&mut self,
 		node_api_addr: &SocketAddr,
-	) -> Arc<Mutex<IntegrationGrinWallet>> {
+	) -> Arc<IntegrationGrinWallet> {
 		let wallet_dir = format!("{}/wallets/{}", self.working_dir, self.wallets.len());
-		let wallet = Arc::new(Mutex::new(
+		let wallet = Arc::new(
 			IntegrationGrinWallet::async_new_wallet(
 				wallet_dir,
 				21000 + self.wallets.len() as u16,
 				format!("http://{}", node_api_addr),
 			)
 			.await,
-		));
+		);
 		self.wallets.push(wallet.clone());
 		wallet
 	}

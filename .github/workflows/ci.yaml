@@ -1,0 +1,196 @@
+name: Continuous Integration
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  clippy:
+    name: Cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - run: rustup toolchain install 1.99.0 --profile minimal --component clippy --component rustfmt
+      - name: Format
+        run: cargo +1.99.0 fmt --all -- --check
+      - name: Clippy
+        run: cargo +1.99.0 clippy --workspace --all-targets --locked -- -D warnings
+
+  linux-tests:
+    name: Linux Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Tests
+        run: |
+          cargo test --release --locked --lib --bins
+          cargo test --release --locked --doc
+
+  musl-tests:
+    name: Linux musl ${{ matrix.arch }} Tests
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    container:
+      image: ${{ matrix.image }}
+    env:
+      OPENSSL_STATIC: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            image: messense/rust-musl-cross:x86_64-musl@sha256:ce75e9174325d4fbb3de85c309e2d7ca29f7500169bc4b5d2c611ff7e86d549a
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            image: messense/rust-musl-cross:aarch64-musl@sha256:ecae5dd62d1c938c14f8071d36c16fa699860aace03bfb5284fb1216474d2643
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Check binary
+        run: |
+          binary=target/${{ matrix.target }}/release/mwixnet
+          file "$binary"
+          readelf -l "$binary" > program-headers.txt
+          readelf -d "$binary" > dynamic-section.txt
+          if grep -q INTERP program-headers.txt || grep -q NEEDED dynamic-section.txt; then
+            echo "binary is dynamically linked"
+            exit 1
+          fi
+          "$binary" --version
+      - name: Tests
+        run: |
+          cargo test --release --locked --target ${{ matrix.target }} --lib --bins
+          cargo test --release --locked --target ${{ matrix.target }} --doc
+
+  macos-tests:
+    name: macOS Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Tests
+        run: |
+          cargo test --release --locked --lib --bins
+          cargo test --release --locked --doc
+
+  windows-tests:
+    name: Windows Tests
+    runs-on: windows-2022
+    env:
+      ROARING_ARCH: x86-64-v2
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Unit tests
+        run: cargo test --release --locked --lib --bins
+      - name: Doc tests
+        run: cargo test --release --locked --doc
+
+  bsd-tests:
+    name: ${{ matrix.name }} Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: cpa.sh {0} --sync-files runner-to-vm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: OpenBSD
+            os: openbsd
+            version: "7.9"
+            install: sudo pkg_add rust git cmake pkgconf gmake curl
+          - name: FreeBSD
+            os: freebsd
+            version: "14.4"
+            install: sudo pkg install -y rust git cmake pkgconf gmake curl perl5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Start ${{ matrix.name }}
+        uses: cross-platform-actions/action@v1.3.0
+        with:
+          operating_system: ${{ matrix.os }}
+          architecture: x86-64
+          version: ${{ matrix.version }}
+          memory: 8G
+          cpu_count: 4
+      - name: Install dependencies
+        run: ${{ matrix.install }}
+      - name: Build
+        run: |
+          set -e
+          if [ "${{ matrix.os }}" = openbsd ]; then
+            export LZMA_API_STATIC=1
+            ulimit -n 1024
+          fi
+          cargo build --release --locked
+      - name: Check binary
+        run: |
+          set -e
+          binary=target/release/mwixnet
+          file "$binary"
+          if [ "${{ matrix.os }}" = openbsd ]; then
+            objdump -p "$binary" > binary-headers.txt
+            if grep -q 'NEEDED.*liblzma' binary-headers.txt; then
+              echo "liblzma is dynamically linked"
+              exit 1
+            fi
+          fi
+          "$binary" --version
+      - name: Tests
+        run: |
+          set -e
+          if [ "${{ matrix.os }}" = openbsd ]; then
+            export LZMA_API_STATIC=1
+            ulimit -n 1024
+          fi
+          cargo test --release --locked --lib --bins
+          cargo test --release --locked --doc
+
+  e2e-tests:
+    name: Linux E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Build tests
+        run: cargo test --release --locked --test e2e --no-run
+      - name: Tests
+        timeout-minutes: 10
+        run: cargo test --release --locked --test e2e
+
+  telegram-notify:
+    name: Telegram Notification
+    needs: [clippy, linux-tests, musl-tests, macos-tests, windows-tests, bsd-tests, e2e-tests]
+    if: always() && github.event_name == 'push'
+    uses: ./.github/workflows/telegram.yaml
+    secrets: inherit
+    with:
+      title: MWixnet CI
+      status: ${{ contains(join(needs.*.result, ','), 'failure') && 'failed' || contains(join(needs.*.result, ','), 'cancelled') && 'cancelled' || 'success' }}
+      details: |
+        <b>Clippy:</b> ${{ needs.clippy.result }}
+        <b>Linux:</b> ${{ needs.linux-tests.result }}
+        <b>musl:</b> ${{ needs.musl-tests.result }}
+        <b>macOS:</b> ${{ needs.macos-tests.result }}
+        <b>Windows:</b> ${{ needs.windows-tests.result }}
+        <b>BSD:</b> ${{ needs.bsd-tests.result }}
+        <b>E2E:</b> ${{ needs.e2e-tests.result }}
+      commit_message: ${{ github.event.head_commit.message }}

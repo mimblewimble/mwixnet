@@ -1,6 +1,7 @@
 use std::iter;
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::time::Duration;
 
 use grin_api::{client, json_rpc};
 use grin_core::core::Transaction;
@@ -22,7 +23,7 @@ pub struct IntegrationSwapServer<R: tor_rtcompat::Runtime> {
 	tor_instance: Arc<grin_util::Mutex<TorService<R>>>,
 	swap_server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
 	rpc_server: mwixnet::servers::rpc::RpcServer,
-	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
+	_wallet: Arc<IntegrationGrinWallet>,
 }
 
 impl<R: tor_rtcompat::Runtime> IntegrationSwapServer<R> {
@@ -66,10 +67,9 @@ pub struct IntegrationMixServer<R: tor_rtcompat::Runtime> {
 	onion_pubkey: MwixnetServerPublicKey,
 	tor_instance: Arc<grin_util::Mutex<TorService<R>>>,
 	rpc_server: mwixnet::servers::rpc::RpcServer,
-	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
+	_wallet: Arc<IntegrationGrinWallet>,
 }
 
-#[allow(clippy::await_holding_lock)]
 async fn async_new_swap_server<R>(
 	data_dir: &str,
 	rt_handle: &tokio::runtime::Handle,
@@ -82,7 +82,8 @@ async fn async_new_swap_server<R>(
 where
 	R: tor_rtcompat::Runtime + tor_rtcompat::ToplevelBlockOn,
 {
-	let wallet = wallets.async_new_wallet(&node.lock().api_address()).await;
+	let node_addr = node.lock().api_address();
+	let wallet = wallets.async_new_wallet(&node_addr).await;
 
 	let server_config = mwixnet::ServerConfig {
 		key: server_key.clone(),
@@ -93,7 +94,7 @@ where
 			.unwrap(),
 		grin_node_url: node.lock().api_address().to_string(),
 		grin_node_foreign_api_secret_path: None,
-		wallet_owner_url: wallet.lock().owner_address().to_string(),
+		wallet_owner_url: wallet.owner_address().to_string(),
 		wallet_owner_secret_path: None,
 		collect_fees: true,
 		min_circuit_timeout_ms: mwixnet::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
@@ -120,7 +121,7 @@ where
 			))),
 			None => None,
 		},
-		Some(wallet.lock().get_client()),
+		Some(wallet.get_client()),
 		node.lock().to_client(),
 		store,
 	)
@@ -135,7 +136,6 @@ where
 	}
 }
 
-#[allow(clippy::await_holding_lock)]
 #[allow(clippy::too_many_arguments)]
 async fn async_new_mix_server<R>(
 	data_dir: &str,
@@ -150,7 +150,8 @@ async fn async_new_mix_server<R>(
 where
 	R: tor_rtcompat::Runtime + tor_rtcompat::ToplevelBlockOn,
 {
-	let wallet = wallets.async_new_wallet(&node.lock().api_address()).await;
+	let node_addr = node.lock().api_address();
+	let wallet = wallets.async_new_wallet(&node_addr).await;
 	let server_config = mwixnet::ServerConfig {
 		key: server_key.clone(),
 		interval_s: 15,
@@ -160,7 +161,7 @@ where
 			.unwrap(),
 		grin_node_url: node.lock().api_address().to_string(),
 		grin_node_foreign_api_secret_path: None,
-		wallet_owner_url: wallet.lock().owner_address().to_string(),
+		wallet_owner_url: wallet.owner_address().to_string(),
 		wallet_owner_secret_path: None,
 		collect_fees: true,
 		min_circuit_timeout_ms: mwixnet::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
@@ -185,7 +186,7 @@ where
 			))),
 			None => None,
 		},
-		Some(wallet.lock().get_client()),
+		Some(wallet.get_client()),
 		node.lock().to_client(),
 	)
 	.unwrap();
@@ -219,7 +220,7 @@ impl Servers {
 				.take(num_mixers + 1)
 				.collect();
 
-		// Setup mock tor network
+		// Connect to the Tor network
 		let tor_runtime = PreferredRuntime::current().unwrap();
 
 		// Build mixers in reverse order
@@ -265,7 +266,43 @@ impl Servers {
 			MwixnetServerIdentityKey::from_secret(&server_keys[0]).to_hex()
 		);
 
-		Servers { swapper, mixers }
+		let servers = Servers { swapper, mixers };
+		servers.wait_for_mixers().await;
+		servers
+	}
+
+	async fn wait_for_mixers(&self) {
+		for (i, mixer) in self.mixers.iter().enumerate() {
+			let tor = if i == 0 {
+				&self.swapper.tor_instance
+			} else {
+				&self.mixers[i - 1].tor_instance
+			};
+			let client = tor.lock().client().expect("Tor client is running");
+			let address = grin_wallet_util::OnionV3Address::from_bytes(
+				MwixnetServerIdentityKey::from_secret(&mixer.server_key)
+					.as_ref()
+					.to_bytes(),
+			);
+			let url = format!("{}/v1", address.to_http_str());
+			let request = json!({"jsonrpc": "2.0", "id": 1, "method": "health", "params": []});
+			tokio::time::timeout(Duration::from_secs(180), async {
+				loop {
+					match tor::async_post(client.clone(), &url, request.to_string()).await {
+						Ok(body) => {
+							let response: serde_json::Value =
+								serde_json::from_str(&body).expect("valid mixer health response");
+							assert_eq!(response["result"], "ok", "Mixer {i}: {body}");
+							break;
+						}
+						Err(error) => eprintln!("Waiting for mixer {i}: {error}"),
+					}
+					tokio::time::sleep(Duration::from_secs(2)).await;
+				}
+			})
+			.await
+			.unwrap_or_else(|_| panic!("Mixer {i} at {url} was not reachable within 180s"));
+		}
 	}
 
 	pub fn get_server_keys(&self) -> Vec<MwixnetServerPublicKey> {
