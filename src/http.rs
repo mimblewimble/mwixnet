@@ -73,6 +73,18 @@ pub async fn async_send_json_request<D: serde::de::DeserializeOwned>(
 	method: &str,
 	params: &serde_json::Value,
 ) -> Result<D, HttpError> {
+	async_send_json_rpc_request(url, api_secret, method, params)
+		.await?
+		.into_result()
+		.map_err(HttpError::ResponseParseError)
+}
+
+pub(crate) async fn async_send_json_rpc_request(
+	url: &String,
+	api_secret: &Option<String>,
+	method: &str,
+	params: &serde_json::Value,
+) -> Result<json_rpc::Response, HttpError> {
 	let req_body = json!({
 		"method": method,
 		"params": params,
@@ -81,13 +93,7 @@ pub async fn async_send_json_request<D: serde::de::DeserializeOwned>(
 	});
 	let req = build_request(url, api_secret, serde_json::to_string(&req_body).unwrap())?;
 	let data = send_request_async(req).await?;
-	let ser: json_rpc::Response =
-		serde_json::from_str(&data).map_err(HttpError::ResponseJsonError)?;
-	let parsed = ser
-		.clone()
-		.into_result()
-		.map_err(HttpError::ResponseParseError)?;
-	Ok(parsed)
+	serde_json::from_str(&data).map_err(HttpError::ResponseJsonError)
 }
 
 pub fn build_request(

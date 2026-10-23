@@ -238,12 +238,30 @@ impl GrinNode for HttpGrinNode {
 		max_height: Option<u64>,
 	) -> Result<Option<LocatedTxKernel>, NodeError> {
 		let params = json!([excess.0.as_ref().to_hex(), min_height, max_height]);
-		let value = self
-			.async_send_request::<serde_json::Value>("get_kernel", &params)
-			.await?;
+		let url = format!("{}{}", self.node_url, ENDPOINT);
+		let response = http::async_send_json_rpc_request(
+			&url,
+			&self.node_foreign_api_secret,
+			"get_kernel",
+			&params,
+		)
+		.await
+		.map_err(NodeError::NodeCommError)?;
+		if let Some(error) = response.error {
+			return Err(NodeError::ResponseParseError(
+				grin_api::json_rpc::Error::Rpc(error),
+			));
+		}
 
-		serde_json::from_value::<Option<LocatedTxKernel>>(value)
-			.map_err(NodeError::DecodeResponseError)
+		match serde_json::from_value::<Result<LocatedTxKernel, grin_api::Error>>(
+			response.result.unwrap_or(serde_json::Value::Null),
+		)
+		.map_err(NodeError::DecodeResponseError)?
+		{
+			Ok(kernel) => Ok(Some(kernel)),
+			Err(grin_api::Error::NotFound) => Ok(None),
+			Err(error) => Err(NodeError::ApiCommError(error)),
+		}
 	}
 }
 
