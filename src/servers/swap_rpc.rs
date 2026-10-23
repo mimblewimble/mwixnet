@@ -1,23 +1,28 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::FutureExt;
 use jsonrpc_core::{BoxFuture, Value};
 use jsonrpc_derive::rpc;
-use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
 
 pub use grin_wallet_libwallet::mwixnet::SwapReq;
 
-use crate::config::ServerConfig;
+use crate::config::{PublicRoute, ServerConfig, ServerInfo};
 use crate::mix_client::MixClient;
 use crate::node::GrinNode;
+use crate::servers::rpc::RpcServer;
 use crate::servers::swap::{SwapError, SwapServer, SwapServerImpl};
 use crate::store::SwapStore;
 use crate::wallet::Wallet;
 
-pub type SwapServerHandle = Arc<tokio::sync::Mutex<dyn SwapServer>>;
-
 #[rpc(server)]
 pub trait SwapAPI {
+	#[rpc(name = "get_server_info")]
+	fn get_server_info(&self) -> jsonrpc_core::Result<ServerInfo>;
+
+	#[rpc(name = "get_route")]
+	fn get_route(&self) -> jsonrpc_core::Result<PublicRoute>;
+
 	#[rpc(name = "health")]
 	fn health(&self) -> jsonrpc_core::Result<Value>;
 
@@ -27,28 +32,18 @@ pub trait SwapAPI {
 
 #[derive(Clone)]
 struct RPCSwapServer {
+	started_at: Instant,
 	server_config: ServerConfig,
-	server: SwapServerHandle,
+	server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
 }
 
 impl RPCSwapServer {
 	/// Spin up an instance of the JSON-RPC HTTP server.
-	fn start_http(&self, runtime_handle: tokio::runtime::Handle) -> jsonrpc_http_server::Server {
+	fn start_http(&self, runtime: tokio::runtime::Handle) -> Result<RpcServer, grin_api::Error> {
 		let mut io = jsonrpc_core::IoHandler::new();
 		io.extend_with(RPCSwapServer::to_delegate(self.clone()));
 
-		ServerBuilder::new(io)
-			.event_loop_executor(runtime_handle)
-			.cors(DomainsValidation::Disabled)
-			.request_middleware(|request: hyper_legacy::Request<hyper_legacy::Body>| {
-				if request.uri() == "/v1" {
-					request.into()
-				} else {
-					jsonrpc_http_server::Response::bad_request("Only v1 supported").into()
-				}
-			})
-			.start_http(&self.server_config.addr)
-			.expect("Unable to start RPC server")
+		RpcServer::start(self.server_config.addr, io, runtime)
 	}
 }
 
@@ -66,6 +61,16 @@ impl From<SwapError> for jsonrpc_core::Error {
 }
 
 impl SwapAPI for RPCSwapServer {
+	fn get_server_info(&self) -> jsonrpc_core::Result<ServerInfo> {
+		Ok(self
+			.server_config
+			.server_info(self.started_at.elapsed().as_secs()))
+	}
+
+	fn get_route(&self) -> jsonrpc_core::Result<PublicRoute> {
+		Ok(self.server_config.public_route())
+	}
+
 	fn health(&self) -> jsonrpc_core::Result<Value> {
 		Ok(Value::String("ok".into()))
 	}
@@ -80,6 +85,9 @@ impl SwapAPI for RPCSwapServer {
 	}
 }
 
+pub type ListenResult =
+	Result<(Arc<tokio::sync::Mutex<dyn SwapServer>>, RpcServer), Box<dyn std::error::Error>>;
+
 /// Spin up the JSON-RPC web server
 pub fn listen(
 	rt_handle: &tokio::runtime::Handle,
@@ -88,8 +96,7 @@ pub fn listen(
 	wallet: Option<Arc<dyn Wallet>>,
 	node: Arc<dyn GrinNode>,
 	store: SwapStore,
-) -> std::result::Result<(SwapServerHandle, jsonrpc_http_server::Server), Box<dyn std::error::Error>>
-{
+) -> ListenResult {
 	let server = SwapServerImpl::new(
 		server_config.clone(),
 		next_server,
@@ -100,11 +107,12 @@ pub fn listen(
 	let server = Arc::new(tokio::sync::Mutex::new(server));
 
 	let rpc_server = RPCSwapServer {
+		started_at: std::time::Instant::now(),
 		server_config: server_config.clone(),
 		server: server.clone(),
 	};
 
-	let http_server = rpc_server.start_http(rt_handle.clone());
+	let http_server = rpc_server.start_http(rt_handle.clone())?;
 
 	Ok((server, http_server))
 }
@@ -114,8 +122,11 @@ mod tests {
 	use std::net::TcpListener;
 	use std::sync::Arc;
 
+	use bytes::Bytes;
 	use grin_wallet_libwallet::mwixnet::onion as grin_onion;
-	use hyper_legacy::{Body, Client, Request, Response};
+	use http_body_util::{BodyExt, Full};
+	use hyper::{body::Incoming, Request, Response};
+	use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 	use tokio::sync::Mutex;
 
 	use grin_onion::create_onion;
@@ -125,16 +136,16 @@ mod tests {
 	use crate::config::ServerConfig;
 	use crate::servers::swap::mock::MockSwapServer;
 	use crate::servers::swap::{SwapError, SwapServer};
-	use crate::servers::swap_rpc::{RPCSwapServer, SwapReq, SwapServerHandle};
+	use crate::servers::swap_rpc::{RPCSwapServer, SwapReq};
 
-	async fn body_to_string(req: Response<Body>) -> String {
-		let body_bytes = hyper_legacy::body::to_bytes(req.into_body()).await.unwrap();
+	async fn body_to_string(req: Response<Incoming>) -> String {
+		let body_bytes = req.into_body().collect().await.unwrap().to_bytes();
 		String::from_utf8(body_bytes.to_vec()).unwrap()
 	}
 
 	/// Spin up a temporary web service, query the API, then cleanup and return response
 	async fn async_make_request(
-		server: SwapServerHandle,
+		server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
 		req: String,
 		runtime_handle: &tokio::runtime::Handle,
 	) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -148,26 +159,31 @@ mod tests {
 			wallet_owner_secret_path: None,
 			collect_fees: true,
 			min_circuit_timeout_ms: crate::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
+			data_dir: "".to_string(),
 			prev_server: None,
 			next_server: None,
 		};
 
 		let rpc_server = RPCSwapServer {
+			started_at: std::time::Instant::now(),
 			server_config: server_config.clone(),
 			server: server.clone(),
 		};
 
 		// Start the JSON-RPC server
-		let http_server = rpc_server.start_http(runtime_handle.clone());
+		let http_server = rpc_server.start_http(runtime_handle.clone())?;
 
 		let uri = format!("http://{}/v1", server_config.addr);
 
 		let request = Request::post(uri)
 			.header("Content-Type", "application/json")
-			.body(Body::from(req))
+			.body(Full::new(Bytes::from(req)))
 			.unwrap();
 
-		let response = Client::new().request(request).await?;
+		let response = Client::builder(TokioExecutor::new())
+			.build_http()
+			.request(request)
+			.await?;
 
 		let response_str: String = body_to_string(response).await;
 
@@ -175,7 +191,7 @@ mod tests {
 		server.lock().await.execute_round().await?;
 
 		// Stop the server
-		http_server.close();
+		drop(http_server);
 
 		Ok(response_str)
 	}
@@ -206,7 +222,7 @@ mod tests {
 			.enable_all()
 			.build()?;
 		let commitment = secp::commit(1234, &secp::random_secret(false))?;
-		let onion = create_onion(&commitment, &vec![], false)?;
+		let onion = create_onion(&commitment, &[], false)?;
 		let comsig = ComSignature::sign(
 			1234,
 			&secp::random_secret(false),
@@ -259,7 +275,7 @@ mod tests {
 			.build()?;
 
 		let commitment = secp::commit(1234, &secp::random_secret(false))?;
-		let onion = create_onion(&commitment, &vec![], false)?;
+		let onion = create_onion(&commitment, &[], false)?;
 		let comsig = ComSignature::sign(
 			1234,
 			&secp::random_secret(false),

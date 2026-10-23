@@ -1,0 +1,20 @@
+name: mwixnet-monitor
+about: Check onion health every two minutes
+
+args:
+  - data_dir:
+      help: Tor data directory separate from the servers
+      long: data_dir
+      short: d
+      value_name: DIR
+      takes_value: true
+      required: false
+  - once:
+      help: Check once and exit with an error if any target fails
+      long: once
+      takes_value: false
+  - target:
+      help: Onion services to check
+      value_name: NAME=ADDRESS.onion
+      multiple: true
+      required: true

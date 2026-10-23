@@ -73,3 +73,15 @@ Here is an example of how to call the 'swap' API:
   "id": "1"
 }
 ```
+
+## Server info
+
+Available on swap and mix servers at `/v1` with `params: []`.
+
+- `health` returns `"ok"`.
+- `get_server_info` returns `network`, `role`, `version`, `round_interval_s`
+  (`null` for mixers), `minimum_fee` in nanogrin per hop and `uptime_s` since RPC startup.
+- `get_route` returns `network`, `server` and `next` from the configuration.
+  `server` contains `role`, `onion_address`, `identity_key` (Ed25519) and `onion_key` (X25519).
+  `next` contains `onion_address` and `identity_key`, or is `null` for the last server.
+  Keys are hex encoded.

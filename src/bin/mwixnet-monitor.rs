@@ -12,16 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
 use arti_client::{config::TorClientConfigBuilder, TorClient};
-use clap::{App, Arg};
+use clap::{load_yaml, App, Error, ErrorKind};
 use futures::future::join_all;
 use mwixnet::tor::async_post;
 use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tor_hsservice::HsId;
 use tor_rtcompat::PreferredRuntime;
+
+use grin_wallet_config::config::GRIN_HOME;
 
 fn target(value: &str) -> Result<(String, String), String> {
 	let (name, address) = value.split_once('=').ok_or("Expected NAME=ADDRESS.onion")?;
@@ -44,33 +45,23 @@ fn healthy(body: &str) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let args = App::new("mwixnet-monitor")
-		.about("Check onion health every two minutes")
-		.arg(
-			Arg::with_name("data-dir")
-				.long("data-dir")
-				.takes_value(true)
-				.required(true),
-		)
-		.arg(
-			Arg::with_name("once")
-				.long("once")
-				.help("Check once and exit"),
-		)
-		.arg(
-			Arg::with_name("target")
-				.value_name("NAME=ADDRESS.onion")
-				.multiple(true)
-				.required(true)
-				.validator(|v| target(&v).map(|_| ())),
-		)
-		.get_matches();
+	let yml = load_yaml!("mwixnet-monitor.yml");
+	let args = App::from_yaml(yml).get_matches();
 	let targets: Vec<_> = args
 		.values_of("target")
 		.unwrap()
-		.map(|v| target(v).unwrap())
-		.collect();
-	let data_dir = PathBuf::from(args.value_of("data-dir").unwrap());
+		.map(|value| target(value).map_err(|error| format!("Invalid target '{value}': {error}")))
+		.collect::<Result<_, _>>()
+		.unwrap_or_else(|error| Error::with_description(&error, ErrorKind::ValueValidation).exit());
+	let data_dir = match args.value_of("data_dir") {
+		Some(value) => PathBuf::from(value),
+		None => {
+			let mut grin_path = dirs::home_dir().unwrap_or_default();
+			grin_path.push(GRIN_HOME);
+			grin_path.push("mwixnet-monitor");
+			grin_path
+		}
+	};
 	let mut config =
 		TorClientConfigBuilder::from_directories(data_dir.join("state"), data_dir.join("cache"));
 	config.address_filter().allow_onion_addrs(true);

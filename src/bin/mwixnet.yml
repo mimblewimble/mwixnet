@@ -8,6 +8,11 @@ args:
       short: c
       long: config_file
       takes_value: true
+  - data_dir:
+      help: Directory in which data files are stored
+      short: d
+      long: data_dir
+      takes_value: true
   - testnet:
       help: Run grin against the Testnet (as opposed to mainnet)
       long: testnet
@@ -47,16 +52,25 @@ args:
       long: bind_addr
       takes_value: true
   - prev_server:
-      help: Hex Ed25519 identity key of the previous swap/mix server
+      help: Hex Ed25519 identity key or .onion address of the previous swap/mix server
       long: prev_server
       takes_value: true
   - next_server:
-      help: Hex Ed25519 identity key of the next mix server
+      help: Hex Ed25519 identity key or .onion address of the next mix server
       long: next_server
       takes_value: true
 subcommands:
   - init-config:
       about: Writes a new configuration file
+  - onion-address:
+      about: Onion address of the server
+      args:
+        - output_file:
+            help: Path to output the address to
+            long: output_file
+            short: o
+            takes_value: true
+            required: false
   - pubkey:
       about: Outputs the Ed25519 identity key of the server
       args:

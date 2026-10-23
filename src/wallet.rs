@@ -12,8 +12,8 @@ use serde_json::json;
 use thiserror::Error;
 
 use grin_onion::crypto::secp;
+use grin_util::secp::{PublicKey, Secp256k1, SecretKey};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
-use secp256k1zkp::{PublicKey, Secp256k1, SecretKey};
 
 use crate::http;
 
@@ -192,25 +192,26 @@ pub mod mock {
 	use grin_keychain::BlindingFactor;
 
 	use grin_onion::crypto::secp;
-	use secp256k1zkp::pedersen::Commitment;
-	use secp256k1zkp::Secp256k1;
+	use grin_util::secp::pedersen::Commitment;
+	use grin_util::secp::Secp256k1;
 
 	use super::{Wallet, WalletError};
 
 	/// Mock implementation of the 'Wallet' trait for unit-tests.
-	#[derive(Clone, Default)]
+	#[derive(Clone)]
 	pub struct MockWallet {
 		built_outputs: Arc<Mutex<Vec<Commitment>>>,
 	}
 
-	impl MockWallet {
-		/// Creates a new, empty MockWallet.
-		pub fn new() -> Self {
+	impl Default for MockWallet {
+		fn default() -> Self {
 			MockWallet {
 				built_outputs: Arc::new(Mutex::new(Vec::new())),
 			}
 		}
+	}
 
+	impl MockWallet {
 		/// Returns the commitments of all outputs built for the wallet.
 		pub fn built_outputs(&self) -> Vec<Commitment> {
 			self.built_outputs.lock().unwrap().clone()
@@ -227,14 +228,16 @@ pub mod mock {
 			let secp = Secp256k1::new();
 			let blind = secp::random_secret(false);
 			let commit = secp::commit(amount, &blind).unwrap();
-			let proof = secp.bullet_proof(
-				amount,
-				blind.clone(),
-				secp::random_secret(false),
-				secp::random_secret(false),
-				None,
-				None,
-			);
+			let proof = secp
+				.bullet_proof(
+					amount,
+					blind.clone(),
+					secp::random_secret(false),
+					secp::random_secret(false),
+					None,
+					None,
+				)
+				.expect("failed to generate test bulletproof");
 			let output = Output::new(OutputFeatures::Plain, commit, proof);
 
 			let mut locked = self.built_outputs.lock().unwrap();

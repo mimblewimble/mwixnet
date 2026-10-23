@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Build
         run: cargo build --release --locked --bins
@@ -76,6 +78,8 @@ jobs:
             image: messense/rust-musl-cross:aarch64-musl@sha256:ecae5dd62d1c938c14f8071d36c16fa699860aace03bfb5284fb1216474d2643
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Build
         env:
@@ -137,6 +141,8 @@ jobs:
             build: cargo build --release --locked --bins
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Start ${{ matrix.name }}
         uses: cross-platform-actions/action@v1.3.0
@@ -211,6 +217,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Build
         run: cargo build --release --locked --bins --target x86_64-apple-darwin
@@ -250,6 +258,8 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Build
         run: cargo build --release --locked --bins --target aarch64-apple-darwin
@@ -288,6 +298,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Build
         run: cargo build --release --locked --bins

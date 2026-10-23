@@ -28,7 +28,7 @@ use tor_keymgr::{ArtiNativeKeystore, KeyMgrBuilder, KeystoreSelector};
 use tor_llcrypto::pk::ed25519::ExpandedKeypair;
 use tor_rtcompat::{Runtime, SleepProviderExt, ToplevelBlockOn};
 
-use secp256k1zkp::SecretKey;
+use grin_util::secp::SecretKey;
 
 use crate::config::ServerConfig;
 
@@ -87,7 +87,6 @@ impl<R: Runtime> TorService<R> {
 
 pub async fn async_init_tor<R>(
 	runtime: R,
-	data_dir: &str,
 	server_config: &ServerConfig,
 ) -> Result<TorService<R>, TorError>
 where
@@ -95,8 +94,8 @@ where
 {
 	info!("Initializing Tor client");
 
-	let state_dir = format!("{}/tor/state", data_dir);
-	let cache_dir = format!("{}/tor/cache", data_dir);
+	let state_dir = format!("{}/tor/state", server_config.data_dir);
+	let cache_dir = format!("{}/tor/cache", server_config.data_dir);
 	let onion_address = server_config.onion_address().to_string();
 	let hs_nickname = HsNickname::new(onion_address.clone())
 		.map_err(|error| TorError::RequestError(format!("Invalid Onion nickname: {error}")))?;

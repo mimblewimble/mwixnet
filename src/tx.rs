@@ -5,8 +5,8 @@ use grin_core::core::{
 };
 use grin_keychain::BlindingFactor;
 use grin_onion::crypto::secp;
+use grin_util::secp::{ContextFlag, Secp256k1, SecretKey};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
-use secp256k1zkp::{ContextFlag, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -15,19 +15,19 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum TxError {
 	#[error("Error computing transactions's offset: {0:?}")]
-	OffsetError(secp256k1zkp::Error),
+	OffsetError(grin_util::secp::Error),
 	#[error("Error building kernel's fee fields: {0:?}")]
 	KernelFeeError(grin_core::core::transaction::Error),
 	#[error("Error computing kernel's excess: {0:?}")]
-	KernelExcessError(secp256k1zkp::Error),
+	KernelExcessError(grin_util::secp::Error),
 	#[error("Error computing kernel's signature message: {0:?}")]
 	KernelSigMessageError(grin_core::core::transaction::Error),
 	#[error("Error signing kernel: {0:?}")]
-	KernelSigError(secp256k1zkp::Error),
+	KernelSigError(grin_util::secp::Error),
 	#[error("Built kernel failed to verify: {0:?}")]
 	KernelVerifyError(grin_core::core::transaction::Error),
 	#[error("Output blinding factor is invalid: {0:?}")]
-	OutputBlindError(secp256k1zkp::Error),
+	OutputBlindError(grin_util::secp::Error),
 	#[error("Wallet error: {0:?}")]
 	WalletError(crate::wallet::WalletError),
 }
@@ -41,6 +41,12 @@ pub struct TxComponents {
 	pub kernels: Vec<TxKernel>,
 	/// Transaction outputs
 	pub outputs: Vec<Output>,
+}
+
+pub fn minimum_hop_fee(is_swap: bool) -> u64 {
+	let io_count = u64::from(is_swap);
+	TransactionBody::weight_by_iok(io_count, io_count, 1)
+		* grin_core::global::DEFAULT_ACCEPT_FEE_BASE
 }
 
 /// Builds and verifies the finalized swap 'Transaction' using the provided components.
@@ -206,9 +212,9 @@ async fn async_add_kernel_and_collect_fees(
 ///
 /// ```rust
 /// use mwixnet::tx::build_kernel;
-/// use secp256k1zkp::{ContextFlag, Secp256k1};
-/// use secp256k1zkp::key::SecretKey;
-/// use secp256k1zkp::rand::thread_rng;
+/// use grin_util::secp::{ContextFlag, Secp256k1};
+/// use grin_util::secp::key::SecretKey;
+/// use grin_util::secp::rand::thread_rng;
 ///
 /// let secp = Secp256k1::with_caps(ContextFlag::None);
 /// let secret_key = SecretKey::new(&secp, &mut thread_rng());

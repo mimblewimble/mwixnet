@@ -1,33 +1,38 @@
 use std::time::Duration;
 
+use bytes::Bytes;
 use grin_api::json_rpc;
 use grin_util::to_base64;
 use grin_wallet_api::{EncryptedRequest, EncryptedResponse, JsonId};
-use hyper_legacy::body::Body as HyperBody;
-use hyper_legacy::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-use hyper_legacy::Request;
+use http_body_util::{BodyExt, Full};
+use hyper::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use hyper::Request;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use serde_json::json;
 use thiserror::Error;
 
-use secp256k1zkp::SecretKey;
+use grin_util::secp::SecretKey;
 
 /// Error types for HTTP client connections
 #[derive(Error, Debug)]
 pub enum HttpError {
+	#[error("Error loading TLS roots: {0}")]
+	TlsError(std::io::Error),
 	#[error("Error decrypting response")]
 	DecryptResponseError(),
 	#[error("Hyper HTTP error: {0:?}")]
-	HyperHttpError(hyper_legacy::http::Error),
+	HyperHttpError(hyper::http::Error),
 	#[error("Hyper request failed with error: {0:?}")]
-	RequestFailed(hyper_legacy::Error),
+	RequestFailed(hyper_util::client::legacy::Error),
 	#[error("Error with response body: {0:?}")]
-	ResponseBodyError(hyper_legacy::Error),
+	ResponseBodyError(hyper::Error),
 	#[error("Error deserializing JSON response: {0:?}")]
 	ResponseJsonError(serde_json::Error),
 	#[error("Error decoding JSON-RPC response: {0:?}")]
 	ResponseParseError(json_rpc::Error),
 	#[error("Wrong response code: {0}")]
-	ResponseStatusError(hyper_legacy::StatusCode),
+	ResponseStatusError(hyper::StatusCode),
 }
 
 pub async fn async_send_enc_request<D: serde::de::DeserializeOwned>(
@@ -68,6 +73,18 @@ pub async fn async_send_json_request<D: serde::de::DeserializeOwned>(
 	method: &str,
 	params: &serde_json::Value,
 ) -> Result<D, HttpError> {
+	async_send_json_rpc_request(url, api_secret, method, params)
+		.await?
+		.into_result()
+		.map_err(HttpError::ResponseParseError)
+}
+
+pub(crate) async fn async_send_json_rpc_request(
+	url: &String,
+	api_secret: &Option<String>,
+	method: &str,
+	params: &serde_json::Value,
+) -> Result<json_rpc::Response, HttpError> {
 	let req_body = json!({
 		"method": method,
 		"params": params,
@@ -76,53 +93,58 @@ pub async fn async_send_json_request<D: serde::de::DeserializeOwned>(
 	});
 	let req = build_request(url, api_secret, serde_json::to_string(&req_body).unwrap())?;
 	let data = send_request_async(req).await?;
-	let ser: json_rpc::Response =
-		serde_json::from_str(&data).map_err(HttpError::ResponseJsonError)?;
-	let parsed = ser
-		.clone()
-		.into_result()
-		.map_err(HttpError::ResponseParseError)?;
-	Ok(parsed)
+	serde_json::from_str(&data).map_err(HttpError::ResponseJsonError)
 }
 
 pub fn build_request(
 	url: &String,
 	api_secret: &Option<String>,
 	req_body: String,
-) -> Result<Request<HyperBody>, HttpError> {
-	let mut req_builder = hyper_legacy::Request::builder();
+) -> Result<Request<Full<Bytes>>, HttpError> {
+	let mut req_builder = hyper::Request::builder();
 	if let Some(api_secret) = api_secret {
 		let basic_auth = format!("Basic {}", to_base64(&format!("grin:{}", api_secret)));
 		req_builder = req_builder.header(AUTHORIZATION, basic_auth);
 	}
 
 	req_builder
-		.method(hyper_legacy::Method::POST)
+		.method(hyper::Method::POST)
 		.uri(url)
 		.header(USER_AGENT, "grin-client")
 		.header(ACCEPT, "application/json")
 		.header(CONTENT_TYPE, "application/json")
-		.body(HyperBody::from(req_body))
+		.body(Full::from(req_body))
 		.map_err(HttpError::HyperHttpError)
 }
 
-async fn send_request_async(req: Request<HyperBody>) -> Result<String, HttpError> {
-	let https = hyper_tls::HttpsConnector::new();
-	let client = hyper_legacy::Client::builder()
+async fn send_request_async(req: Request<Full<Bytes>>) -> Result<String, HttpError> {
+	let mut client = Client::builder(TokioExecutor::new());
+	client
 		.pool_idle_timeout(Duration::from_secs(30))
-		.build::<_, HyperBody>(https);
+		.pool_timer(TokioTimer::new());
 
-	let resp = client
-		.request(req)
-		.await
-		.map_err(HttpError::RequestFailed)?;
+	let resp = if req.uri().scheme_str() == Some("http") {
+		client.build_http::<Full<Bytes>>().request(req).await
+	} else {
+		let https = hyper_rustls::HttpsConnectorBuilder::new()
+			.with_native_roots()
+			.map_err(HttpError::TlsError)?
+			.https_or_http()
+			.enable_http1()
+			.build();
+		client.build::<_, Full<Bytes>>(https).request(req).await
+	}
+	.map_err(HttpError::RequestFailed)?;
 	if !resp.status().is_success() {
 		return Err(HttpError::ResponseStatusError(resp.status()));
 	}
 
-	let raw = hyper_legacy::body::to_bytes(resp)
+	let raw = resp
+		.into_body()
+		.collect()
 		.await
-		.map_err(HttpError::ResponseBodyError)?;
+		.map_err(HttpError::ResponseBodyError)?
+		.to_bytes();
 
 	Ok(String::from_utf8_lossy(&raw).to_string())
 }

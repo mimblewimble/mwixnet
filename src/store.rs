@@ -152,7 +152,7 @@ impl Readable for SwapData {
 pub struct SwapTx {
 	pub tx: Transaction,
 	pub chain_tip: (u64, Hash),
-	// TODO: Include status
+	pub confirmation: Option<(u64, Hash)>,
 }
 
 impl Writeable for SwapTx {
@@ -161,6 +161,7 @@ impl Writeable for SwapTx {
 		self.tx.write(writer)?;
 		writer.write_u64(self.chain_tip.0)?;
 		self.chain_tip.1.write(writer)?;
+		write_optional(writer, &self.confirmation)?;
 		Ok(())
 	}
 }
@@ -178,6 +179,7 @@ impl Readable for SwapTx {
 		Ok(SwapTx {
 			tx,
 			chain_tip: (height, block_hash),
+			confirmation: read_optional(reader)?,
 		})
 	}
 }
@@ -369,12 +371,12 @@ mod tests {
 	}
 
 	#[test]
-	fn read_migrated_swap() -> Result<(), Box<dyn std::error::Error>> {
-		let store = new_store("read_migrated_swap");
+	fn raw_swap() -> Result<(), Box<dyn std::error::Error>> {
+		let store = new_store("raw_swap");
 		let swap = rand_swap();
 		let data = ser::ser_vec(&swap, ProtocolVersion::local())?;
 
-		// Migration stores raw keys in the prefix database.
+		// Write a raw key to the prefix database
 		let mut batch = store.db.batch()?;
 		batch.put(Some(SWAP_PREFIX), swap.input.commit.as_ref(), &data)?;
 		batch.commit()?;

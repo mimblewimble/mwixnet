@@ -3,9 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use grin_api::LocatedTxKernel;
 use grin_api::{OutputPrintable, OutputType, Tip};
-use grin_core::consensus::COINBASE_MATURITY;
 use grin_core::core::hash::Hash;
 use grin_core::core::{Committed, Input, OutputFeatures, Transaction};
+use grin_core::global;
 use grin_util::ToHex;
 use serde_json::json;
 use thiserror::Error;
@@ -25,6 +25,9 @@ pub trait GrinNode: Send + Sync {
 
 	/// Gets the height and hash of the chain tip
 	async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError>;
+
+	/// Gets the active block hash at a height
+	async fn async_get_header_hash(&self, height: u64) -> Result<Hash, NodeError>;
 
 	/// Posts a transaction to the grin node
 	async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError>;
@@ -78,7 +81,8 @@ pub async fn async_is_spendable(
 
 		if is_coinbase {
 			if let Some(block_height) = out.block_height {
-				if block_height + COINBASE_MATURITY < next_block_height {
+				let maturity = global::coinbase_maturity();
+				if next_block_height < maturity || block_height > next_block_height - maturity {
 					return Ok(false);
 				}
 			} else {
@@ -211,6 +215,15 @@ impl GrinNode for HttpGrinNode {
 		))
 	}
 
+	async fn async_get_header_hash(&self, height: u64) -> Result<Hash, NodeError> {
+		let params = json!([height, null, null]);
+		let header: grin_api::BlockHeaderPrintable =
+			self.async_send_request("get_header", &params).await?;
+		Hash::from_hex(&header.hash).map_err(|error| {
+			NodeError::ApiCommError(grin_api::Error::ResponseError(error.to_string()))
+		})
+	}
+
 	async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError> {
 		let params = json!([tx, true]);
 		self.async_send_request::<serde_json::Value>("push_transaction", &params)
@@ -225,12 +238,30 @@ impl GrinNode for HttpGrinNode {
 		max_height: Option<u64>,
 	) -> Result<Option<LocatedTxKernel>, NodeError> {
 		let params = json!([excess.0.as_ref().to_hex(), min_height, max_height]);
-		let value = self
-			.async_send_request::<serde_json::Value>("get_kernel", &params)
-			.await?;
+		let url = format!("{}{}", self.node_url, ENDPOINT);
+		let response = http::async_send_json_rpc_request(
+			&url,
+			&self.node_foreign_api_secret,
+			"get_kernel",
+			&params,
+		)
+		.await
+		.map_err(NodeError::NodeCommError)?;
+		if let Some(error) = response.error {
+			return Err(NodeError::ResponseParseError(
+				grin_api::json_rpc::Error::Rpc(error),
+			));
+		}
 
-		serde_json::from_value::<Option<LocatedTxKernel>>(value)
-			.map_err(NodeError::DecodeResponseError)
+		match serde_json::from_value::<Result<LocatedTxKernel, grin_api::Error>>(
+			response.result.unwrap_or(serde_json::Value::Null),
+		)
+		.map_err(NodeError::DecodeResponseError)?
+		{
+			Ok(kernel) => Ok(Some(kernel)),
+			Err(grin_api::Error::NotFound) => Ok(None),
+			Err(error) => Err(NodeError::ApiCommError(error)),
+		}
 	}
 }
 
@@ -255,12 +286,9 @@ pub mod mock {
 		utxos: HashMap<Commitment, OutputPrintable>,
 		txns_posted: RwLock<Vec<Transaction>>,
 		kernels: HashMap<Commitment, LocatedTxKernel>,
-	}
-
-	impl Default for MockGrinNode {
-		fn default() -> Self {
-			Self::new()
-		}
+		pub tip: (u64, Hash),
+		pub headers: HashMap<u64, Hash>,
+		pub kernel_lookups: RwLock<usize>,
 	}
 
 	impl MockGrinNode {
@@ -269,15 +297,14 @@ pub mod mock {
 				utxos: HashMap::new(),
 				txns_posted: RwLock::new(Vec::new()),
 				kernels: HashMap::new(),
+				tip: (100, Hash::default()),
+				headers: HashMap::new(),
+				kernel_lookups: RwLock::new(0),
 			}
 		}
 
 		pub fn new_with_utxos(utxos: &Vec<&Commitment>) -> Self {
-			let mut node = MockGrinNode {
-				utxos: HashMap::new(),
-				txns_posted: RwLock::new(Vec::new()),
-				kernels: HashMap::new(),
-			};
+			let mut node = Self::new();
 			for utxo in utxos {
 				node.add_default_utxo(utxo);
 			}
@@ -309,7 +336,15 @@ pub mod mock {
 		}
 
 		pub fn add_kernel(&mut self, kernel: &LocatedTxKernel) {
+			self.tip.0 = self.tip.0.max(kernel.height);
+			self.headers.entry(kernel.height).or_default();
 			self.kernels.insert(kernel.tx_kernel.excess, kernel.clone());
+		}
+	}
+
+	impl Default for MockGrinNode {
+		fn default() -> Self {
+			Self::new()
 		}
 	}
 
@@ -327,7 +362,14 @@ pub mod mock {
 		}
 
 		async fn async_get_chain_tip(&self) -> Result<(u64, Hash), NodeError> {
-			Ok((100, Hash::default()))
+			Ok(self.tip)
+		}
+
+		async fn async_get_header_hash(&self, height: u64) -> Result<Hash, NodeError> {
+			self.headers
+				.get(&height)
+				.copied()
+				.ok_or_else(|| NodeError::ApiCommError(grin_api::Error::NotFound))
 		}
 
 		async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError> {
@@ -342,6 +384,7 @@ pub mod mock {
 			_min_height: Option<u64>,
 			_max_height: Option<u64>,
 		) -> Result<Option<LocatedTxKernel>, NodeError> {
+			*self.kernel_lookups.write().unwrap() += 1;
 			if let Some(kernel) = self.kernels.get(excess) {
 				return Ok(Some(kernel.clone()));
 			}
@@ -353,7 +396,52 @@ pub mod mock {
 
 #[cfg(test)]
 mod tests {
-	use super::HttpGrinNode;
+	use super::{async_is_spendable, mock::MockGrinNode, GrinNode, HttpGrinNode};
+	use std::sync::Arc;
+
+	use grin_api::{OutputPrintable, OutputType};
+	use grin_core::global::{self, ChainTypes};
+	use grin_util::secp::pedersen::Commitment;
+
+	#[tokio::test]
+	async fn coinbase_maturity() {
+		for chain_type in [
+			ChainTypes::Mainnet,
+			ChainTypes::Testnet,
+			ChainTypes::AutomatedTesting,
+		] {
+			global::set_local_chain_type(chain_type);
+			let maturity = global::coinbase_maturity();
+			let commit = Commitment::from_vec(vec![0; 33]);
+			let mut mock = MockGrinNode::new();
+			mock.add_utxo(
+				&commit,
+				&OutputPrintable {
+					output_type: OutputType::Coinbase,
+					commit,
+					spent: false,
+					proof: None,
+					proof_hash: String::new(),
+					block_height: Some(10),
+					merkle_proof: None,
+					mmr_index: 0,
+				},
+			);
+			let node: Arc<dyn GrinNode> = Arc::new(mock);
+			for (height, expected) in [
+				(0, false),
+				(10 + maturity - 1, false),
+				(10 + maturity, true),
+				(10 + maturity + 1, true),
+			] {
+				assert_eq!(
+					async_is_spendable(&node, &commit, height).await.unwrap(),
+					expected,
+					"chain {chain_type:?}, height {height}"
+				);
+			}
+		}
+	}
 
 	#[test]
 	fn node_url_supports_http_and_https() {

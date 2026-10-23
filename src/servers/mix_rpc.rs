@@ -1,23 +1,22 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::FutureExt;
+use jsonrpc_core::{self, BoxFuture, IoHandler, Value};
 use jsonrpc_derive::rpc;
-use jsonrpc_http_server::jsonrpc_core::{self, BoxFuture, IoHandler, Value};
-use jsonrpc_http_server::{DomainsValidation, ServerBuilder};
 use serde::{Deserialize, Serialize};
 
 use grin_onion::crypto::dalek::{self, DalekSignature};
 use grin_onion::onion::Onion;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
-use crate::config::ServerConfig;
+use crate::config::{PublicRoute, ServerConfig, ServerInfo};
 use crate::mix_client::MixClient;
 use crate::node::GrinNode;
 use crate::servers::mix::{MixError, MixServer, MixServerImpl};
+use crate::servers::rpc::RpcServer;
 use crate::tx::TxComponents;
 use crate::wallet::Wallet;
-
-pub type MixServerHandle = Arc<tokio::sync::Mutex<dyn MixServer>>;
 
 #[derive(Serialize, Deserialize)]
 pub struct MixReq {
@@ -40,6 +39,12 @@ impl MixReq {
 
 #[rpc(server)]
 pub trait MixAPI {
+	#[rpc(name = "get_server_info")]
+	fn get_server_info(&self) -> jsonrpc_core::Result<ServerInfo>;
+
+	#[rpc(name = "get_route")]
+	fn get_route(&self) -> jsonrpc_core::Result<PublicRoute>;
+
 	#[rpc(name = "health")]
 	fn health(&self) -> jsonrpc_core::Result<Value>;
 
@@ -49,28 +54,18 @@ pub trait MixAPI {
 
 #[derive(Clone)]
 struct RPCMixServer {
+	started_at: Instant,
 	server_config: ServerConfig,
-	server: MixServerHandle,
+	server: Arc<tokio::sync::Mutex<dyn MixServer>>,
 }
 
 impl RPCMixServer {
 	/// Spin up an instance of the JSON-RPC HTTP server.
-	fn start_http(&self, runtime_handle: tokio::runtime::Handle) -> jsonrpc_http_server::Server {
+	fn start_http(&self, runtime: tokio::runtime::Handle) -> Result<RpcServer, grin_api::Error> {
 		let mut io = IoHandler::new();
 		io.extend_with(RPCMixServer::to_delegate(self.clone()));
 
-		ServerBuilder::new(io)
-			.event_loop_executor(runtime_handle)
-			.cors(DomainsValidation::Disabled)
-			.request_middleware(|request: hyper_legacy::Request<hyper_legacy::Body>| {
-				if request.uri() == "/v1" {
-					request.into()
-				} else {
-					jsonrpc_http_server::Response::bad_request("Only v1 supported").into()
-				}
-			})
-			.start_http(&self.server_config.addr)
-			.expect("Unable to start RPC server")
+		RpcServer::start(self.server_config.addr, io, runtime)
 	}
 }
 
@@ -81,6 +76,16 @@ impl From<MixError> for jsonrpc_core::Error {
 }
 
 impl MixAPI for RPCMixServer {
+	fn get_server_info(&self) -> jsonrpc_core::Result<ServerInfo> {
+		Ok(self
+			.server_config
+			.server_info(self.started_at.elapsed().as_secs()))
+	}
+
+	fn get_route(&self) -> jsonrpc_core::Result<PublicRoute> {
+		Ok(self.server_config.public_route())
+	}
+
 	fn health(&self) -> jsonrpc_core::Result<Value> {
 		Ok(Value::String("ok".into()))
 	}
@@ -99,6 +104,9 @@ impl MixAPI for RPCMixServer {
 	}
 }
 
+pub type ListenResult =
+	Result<(Arc<tokio::sync::Mutex<dyn MixServer>>, RpcServer), Box<dyn std::error::Error>>;
+
 /// Spin up the JSON-RPC web server
 pub fn listen(
 	rt_handle: &tokio::runtime::Handle,
@@ -106,16 +114,17 @@ pub fn listen(
 	next_server: Option<Arc<dyn MixClient>>,
 	wallet: Option<Arc<dyn Wallet>>,
 	node: Arc<dyn GrinNode>,
-) -> Result<(MixServerHandle, jsonrpc_http_server::Server), Box<dyn std::error::Error>> {
+) -> ListenResult {
 	let server = MixServerImpl::new(server_config.clone(), next_server, wallet, node.clone());
 	let server = Arc::new(tokio::sync::Mutex::new(server));
 
 	let rpc_server = RPCMixServer {
+		started_at: std::time::Instant::now(),
 		server_config: server_config.clone(),
 		server: server.clone(),
 	};
 
-	let http_server = rpc_server.start_http(rt_handle.clone());
+	let http_server = rpc_server.start_http(rt_handle.clone())?;
 
 	Ok((server, http_server))
 }

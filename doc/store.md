@@ -6,6 +6,8 @@ The `SwapStore` is an LMDB database for swap entries and generated swap transact
 
 New entries remain `Unprocessed` until a round uses them. A successful round marks them `InProcess`; entries rejected by a downstream mixer become `Failed`. Reorg checks can rebroadcast or rebuild the transaction. Automatic transition to `Completed` and deletion are not currently implemented.
 
+SwapTx stores the confirmation height and block hash. Checks reuse the hash until a reorg. Node errors keep the saved confirmation. Rounds never expire, so their count keeps growing.
+
 ## Data Model
 
 `SwapData`  entries are keyed with prefix 'S' followed by the commitment of the output being swapped. Entries are all unique by key.

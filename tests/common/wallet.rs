@@ -7,6 +7,8 @@ use std::time::Duration;
 use grin_core::core::{Output, Transaction, TxKernel};
 use grin_core::global::ChainTypes;
 use grin_keychain::{ExtKeychain, Identifier};
+use grin_util::secp::pedersen::Commitment;
+use grin_util::secp::SecretKey;
 use grin_util::{Mutex, ToHex, ZeroingString};
 use grin_wallet_api::Owner;
 use grin_wallet_config::WalletConfig;
@@ -17,8 +19,6 @@ use grin_wallet_libwallet::{InitTxArgs, Slate, VersionedSlate, WalletInfo, Walle
 use log::error;
 use mwixnet::http;
 use mwixnet::wallet::HttpWallet;
-use secp256k1zkp::pedersen::Commitment;
-use secp256k1zkp::SecretKey;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -85,7 +85,7 @@ impl IntegrationGrinWallet {
 		)
 		.unwrap();
 
-		lc.create_wallet(None, None, 12, ZeroingString::from("pass"), false)
+		lc.create_wallet(None, None, 16, ZeroingString::from("pass"), false)
 			.unwrap();
 
 		// Start owner API

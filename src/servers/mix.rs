@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use grin_core::core::{Output, OutputFeatures, TransactionBody};
+use grin_core::core::{Output, OutputFeatures};
 use grin_core::global::DEFAULT_ACCEPT_FEE_BASE;
 use grin_core::ser;
 use grin_core::ser::ProtocolVersion;
@@ -12,9 +12,9 @@ use thiserror::Error;
 
 use grin_onion::crypto::dalek::{self, DalekSignature};
 use grin_onion::onion::{Onion, OnionError, PeeledOnion};
+use grin_util::secp::key::ZERO_KEY;
+use grin_util::secp::{Secp256k1, SecretKey};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
-use secp256k1zkp::key::ZERO_KEY;
-use secp256k1zkp::Secp256k1;
 
 use crate::config::ServerConfig;
 use crate::mix_client::MixClient;
@@ -68,10 +68,9 @@ pub enum MixError {
 #[async_trait]
 pub trait MixServer: Send + Sync {
 	/// Swaps the outputs provided and returns the final swapped outputs and kernels.
-	#[allow(clippy::ptr_arg, reason = "Grin serialization requires Vec")]
 	async fn mix_outputs(
 		&self,
-		onions: &Vec<Onion>,
+		onions: &[Onion],
 		sig: &DalekSignature,
 	) -> Result<MixResp, MixError>;
 }
@@ -94,6 +93,7 @@ impl MixServerImpl {
 		wallet: Option<Arc<dyn Wallet>>,
 		node: Arc<dyn GrinNode>,
 	) -> Self {
+		let wallet = wallet.filter(|_| server_config.collect_fees);
 		MixServerImpl {
 			secp: Secp256k1::new(),
 			server_config,
@@ -111,7 +111,7 @@ impl MixServerImpl {
 	/// Minimum fee to perform a mix.
 	/// Requires enough fee for the mixer's kernel.
 	fn get_minimum_mix_fee(&self) -> u64 {
-		TransactionBody::weight_by_iok(0, 0, 1) * self.get_fee_base()
+		tx::minimum_hop_fee(false)
 	}
 
 	fn peel_onion(&self, onion: &Onion) -> Result<PeeledOnion, MixError> {
@@ -177,7 +177,7 @@ impl MixServerImpl {
 			.collect();
 
 		let fees_paid = filtered.iter().map(|(_, p)| p.payload.fee.fee()).sum();
-		let output_excesses: Vec<_> = filtered
+		let output_excesses: Vec<SecretKey> = filtered
 			.iter()
 			.map(|(_, p)| p.payload.excess.clone())
 			.collect();
@@ -211,7 +211,7 @@ impl MixServerImpl {
 			.sort_by(|(_, a), (_, b)| a.onion.commit.partial_cmp(&b.onion.commit).unwrap());
 
 		// Call next server
-		let onions = onions_with_index
+		let onions: Vec<Onion> = onions_with_index
 			.iter()
 			.map(|(_, p)| p.onion.clone())
 			.collect();
@@ -228,7 +228,7 @@ impl MixServerImpl {
 		let filtered_onions = filter_by_indices(&onions_with_index, &kept_next_indices);
 
 		// Calculate excess of entries kept
-		let excesses: Vec<_> = filtered_onions
+		let excesses: Vec<SecretKey> = filtered_onions
 			.iter()
 			.map(|(_, p)| p.payload.excess.clone())
 			.collect();
@@ -261,11 +261,11 @@ impl MixServerImpl {
 impl MixServer for MixServerImpl {
 	async fn mix_outputs(
 		&self,
-		onions: &Vec<Onion>,
+		onions: &[Onion],
 		sig: &DalekSignature,
 	) -> Result<MixResp, MixError> {
 		// Verify Signature
-		let serialized = ser::ser_vec(&onions, ProtocolVersion::local()).unwrap();
+		let serialized = ser::ser_vec(&onions.to_vec(), ProtocolVersion::local()).unwrap();
 		sig.verify(
 			self.server_config.prev_server.as_ref().unwrap(),
 			serialized.as_slice(),
@@ -304,11 +304,7 @@ impl MixServer for MixServerImpl {
 
 #[cfg(test)]
 mod test_util {
-	use super::grin_onion;
 	use std::sync::Arc;
-
-	use grin_onion::crypto::dalek::DalekPublicKey;
-	use secp256k1zkp::SecretKey;
 
 	use crate::config;
 	use crate::mix_client::test_util::DirectMixClient;
@@ -316,11 +312,13 @@ mod test_util {
 	use crate::node::mock::MockGrinNode;
 	use crate::servers::mix::MixServerImpl;
 	use crate::wallet::mock::MockWallet;
+	use grin_util::secp::SecretKey;
+	use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
 
 	pub fn new_mixer(
 		server_key: &SecretKey,
-		prev_server: (&SecretKey, &DalekPublicKey),
-		next_server: &Option<(DalekPublicKey, Arc<dyn MixClient>)>,
+		prev_server: (&SecretKey, &MwixnetServerIdentityKey),
+		next_server: &Option<(MwixnetServerIdentityKey, Arc<dyn MixClient>)>,
 		node: &Arc<MockGrinNode>,
 	) -> (Arc<DirectMixClient>, Arc<MockWallet>) {
 		let config = config::test_util::local_config(
@@ -330,7 +328,7 @@ mod test_util {
 		)
 		.unwrap();
 
-		let wallet = Arc::new(MockWallet::new());
+		let wallet = Arc::new(MockWallet::default());
 		let mix_server = Arc::new(MixServerImpl::new(
 			config,
 			next_server.as_ref().map(|(_, c)| c.clone()),
@@ -354,15 +352,14 @@ mod tests {
 
 	use ::function_name::named;
 
-	use grin_onion::crypto::dalek::DalekPublicKey;
+	use crate::mix_client::MixClient;
+	use crate::node::mock::MockGrinNode;
 	use grin_onion::crypto::secp::{self, Commitment};
 	use grin_onion::test_util as onion_test_util;
 	use grin_onion::{create_onion, new_hop, Hop};
-	use secp256k1zkp::pedersen::RangeProof;
-	use secp256k1zkp::SecretKey;
-
-	use crate::mix_client::MixClient;
-	use crate::node::mock::MockGrinNode;
+	use grin_util::secp::pedersen::RangeProof;
+	use grin_util::secp::SecretKey;
+	use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
 
 	macro_rules! init_test {
 		() => {{
@@ -377,7 +374,7 @@ mod tests {
 	struct ServerVars {
 		fee: u32,
 		sk: SecretKey,
-		pk: DalekPublicKey,
+		pk: MwixnetServerIdentityKey,
 		excess: SecretKey,
 	}
 
@@ -458,7 +455,7 @@ mod tests {
 		// Create Onion
 		let onion = create_onion(
 			&input1_commit,
-			&vec![
+			&[
 				swap_vars.build_hop(None),
 				mix1_vars.build_hop(None),
 				mix2_vars.build_hop(Some(proof)),
@@ -469,7 +466,7 @@ mod tests {
 		// Simulate the swap server peeling the onion and then calling mix1
 		let mix1_onion = onion.peel_layer(&swap_vars.sk)?;
 		let mixed = mixer1_client
-			.mix_outputs(&vec![mix1_onion.onion.clone()])
+			.mix_outputs(std::slice::from_ref(&mix1_onion.onion))
 			.await?;
 
 		// Verify 3 outputs are returned: mixed output, mixer1's output, and mixer2's output

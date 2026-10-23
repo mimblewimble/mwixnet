@@ -33,13 +33,14 @@ Check onion reachability every two minutes and log response times
 
 ```sh
 cargo run --release --bin mwixnet-monitor -- \
-  --data-dir "$HOME/.local/share/mwixnet-monitor" \
+  --data_dir "$HOME/.local/share/mwixnet-monitor" \
   swap=mza3u6vkqodqc6kjjapfbcjrg7hgpkuw6nyq5xvfjqp5jm2lfeaocwqd.onion \
   mixer=56bkem4ly7oebmtw7y5d25veoi4t47txqvxlptsy7kctsfid6ekgsuqd.onion
 ```
 
 Use a separate data directory from the servers
 Add `--once` to check once and exit — a failed check returns a nonzero exit code
+See `--help` for all arguments.
 
 #### Wallet workflow
 
@@ -47,7 +48,7 @@ Add `--once` to check once and exit — a failed check returns a nonzero exit co
 2. Run the wallet's experimental `mwixnet` command with an eligible output commitment, the first server's onion address, `fee_per_hop`, and the ordered server keys.
 3. The wallet creates and locks the request, then submits it to the first server's `/v1` endpoint.
 
-Owner API clients can instead call `create_mwixnet_req` and submit the returned `request` field themselves. The result also contains the associated `tx_id` when locking was requested. Routing between servers is fixed by each server's `prev_server` and `next_server` configuration.
+Owner API clients can instead call `create_mwixnet_req` and submit the returned `onion` and `comsig` fields as a `SwapReq`. The result also contains the associated `tx_id` when locking was requested. Routing between servers is fixed by each server's `prev_server` and `next_server` configuration.
 
 ### SWAP API
 The Swap Server (N<sub>1</sub>) provides the `swap` API, which is publicly available for use by GRIN wallets.

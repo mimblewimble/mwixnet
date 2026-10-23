@@ -1,27 +1,26 @@
 #[macro_use]
 extern crate clap;
 
+use clap::App;
+use rand::{thread_rng, Rng};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{sleep, spawn};
 use std::time::Duration;
-
-use clap::App;
-use grin_core::global;
-use grin_core::global::ChainTypes;
-use grin_util::{StopState, ZeroingString};
-use rand::{thread_rng, Rng};
 use tor_rtcompat::PreferredRuntime;
 
+use grin_core::global;
+use grin_core::global::ChainTypes;
 use grin_onion::crypto;
-use grin_onion::crypto::dalek::DalekPublicKey;
+use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
+use grin_util::{StopState, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
+use grin_wallet_util::OnionV3Address;
 use mwixnet::config::{self, ServerConfig};
 use mwixnet::mix_client::{MixClient, MixClientImpl};
 use mwixnet::node::GrinNode;
 use mwixnet::node::HttpGrinNode;
 use mwixnet::servers;
-use mwixnet::store::StoreError;
 use mwixnet::store::SwapStore;
 use mwixnet::tor;
 use mwixnet::wallet::{HttpWallet, Wallet};
@@ -104,12 +103,21 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let wallet_owner_url = args.value_of("wallet_owner_url");
 	let wallet_owner_secret_path = args.value_of("wallet_owner_secret_path");
 	let no_fee_collection = args.is_present("no_fee_collection");
-	let prev_server = args
-		.value_of("prev_server")
-		.map(|p| DalekPublicKey::from_hex(p).unwrap());
-	let next_server = args
-		.value_of("next_server")
-		.map(|p| DalekPublicKey::from_hex(p).unwrap());
+	let data_dir = args.value_of("data_dir");
+
+	let server_identity = |data: &str| -> MwixnetServerIdentityKey {
+		MwixnetServerIdentityKey::from_hex(data).unwrap_or_else(|_| match OnionV3Address::try_from(
+			data,
+		) {
+			Ok(a) => {
+				let key = a.to_ed25519().unwrap();
+				MwixnetServerIdentityKey::from_hex(key.to_hex().as_str()).unwrap()
+			}
+			Err(e) => panic!("Can not get server key from {}: {}", data, e),
+		})
+	};
+	let prev_server = args.value_of("prev_server").map(server_identity);
+	let next_server = args.value_of("next_server").map(server_identity);
 
 	// Write a new config file if init-config command is supplied
 	if let ("init-config", Some(_)) = args.subcommand() {
@@ -146,6 +154,13 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			},
 			collect_fees: !no_fee_collection,
 			min_circuit_timeout_ms: config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
+			data_dir: match data_dir {
+				Some(p) => p.to_owned().replace("\\", "/"),
+				None => config::mwixnet_data_path(&chain_type)
+					.to_str()
+					.unwrap()
+					.to_owned(),
+			},
 			prev_server,
 			next_server,
 		};
@@ -159,6 +174,13 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		return Ok(());
 	}
 
+	if !config_path.exists() {
+		panic!(
+			"No public address configured (Config file not found). {}",
+			config_path.to_string_lossy()
+		);
+	}
+
 	let password = server_password(server_pass_file, false)?;
 	let mut server_config = config::load_config(&config_path, &password)?;
 	if no_fee_collection {
@@ -167,12 +189,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 
 	// Write a new config file if init-config command is supplied
 	if let ("pubkey", Some(_)) = args.subcommand() {
-		if !config_path.exists() {
-			panic!(
-				"No public address configured (Config file not found). {}",
-				config_path.to_string_lossy()
-			);
-		}
 		let sub_args = args.subcommand_matches("pubkey").unwrap();
 		let server_pubkey = server_config.server_pubkey();
 		if sub_args.is_present("output_file") {
@@ -186,13 +202,20 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		return Ok(());
 	}
 
-	if let ("onion-pubkey", Some(_)) = args.subcommand() {
-		if !config_path.exists() {
-			panic!(
-				"No public address configured (Config file not found). {}",
-				config_path.to_string_lossy()
-			);
+	if let ("onion-address", Some(_)) = args.subcommand() {
+		let sub_args = args.subcommand_matches("onion-address").unwrap();
+		let server_address = format!("{}.onion", server_config.onion_address());
+		if sub_args.is_present("output_file") {
+			let output_file = sub_args.value_of("output_file").unwrap();
+			std::fs::write(output_file, server_address)?;
+			println!("Server onion address written to file: {}", output_file);
+		} else {
+			println!("{}", server_address);
 		}
+		return Ok(());
+	}
+
+	if let ("onion-pubkey", Some(_)) = args.subcommand() {
 		let sub_args = args.subcommand_matches("onion-pubkey").unwrap();
 		let onion_pubkey = server_config.onion_pubkey();
 		if sub_args.is_present("output_file") {
@@ -208,6 +231,11 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	// Override grin_node_url, if supplied
 	if let Some(grin_node_url) = grin_node_url {
 		server_config.grin_node_url = grin_node_url.parse()?;
+	}
+
+	// Override data_dir, if supplied
+	if let Some(path) = data_dir {
+		server_config.data_dir = path.to_owned().replace("\\", "/");
 	}
 
 	// Override grin_node_foreign_api_secret_path, if supplied
@@ -281,15 +309,8 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let tor_runtime = rt_handle.block_on(async { PreferredRuntime::current() })?;
 	tor_log_ratelim::install_runtime(tor_runtime.clone())?;
 
-	let tor_data_dir = config::get_grin_path(&chain_type)
-		.to_str()
-		.ok_or("Invalid Tor data directory")?
-		.to_owned();
-	let tor_instance = rt_handle.block_on(tor::async_init_tor(
-		tor_runtime.clone(),
-		&tor_data_dir,
-		&server_config,
-	))?;
+	let tor_instance =
+		rt_handle.block_on(tor::async_init_tor(tor_runtime.clone(), &server_config))?;
 	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
 	let tor_clone = tor_instance.clone();
 
@@ -334,7 +355,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		let close_handle = http_server.close_handle();
 		let round_handle = spawn(move || loop {
 			if stop_state.is_stopped() {
-				close_handle.close();
+				let _ = close_handle.try_send(());
 				break;
 			}
 
@@ -351,14 +372,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		);
 
 		// Open SwapStore
-		let store = SwapStore::new(
-			config::get_grin_path(&chain_type)
-				.join("db")
-				.to_str()
-				.ok_or(StoreError::OpenError(grin_store::lmdb::Error::FileErr(
-					"db_root path error".to_string(),
-				)))?,
-		)?;
+		let store = SwapStore::new(server_config.data_dir.as_str())?;
 
 		// Start the mwixnet JSON-RPC HTTP 'swap' server
 		let (swap_server, http_server) = servers::swap_rpc::listen(
@@ -376,12 +390,25 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			let mut secs = 0u32;
 			let mut reorg_secs = 0u32;
 			let mut reorg_window = rng.gen_range(900u32, 3600u32);
-			let prev_tx = Arc::new(Mutex::new(None));
 			let server = swap_server.clone();
+			rt.block_on(async {
+				tokio::select! {
+					result = async { server.lock().await.check_pending().await } => {
+						if let Err(error) = result {
+							log::error!("Pending swap check failed: {}", error);
+						}
+					}
+					_ = async {
+						while !stop_state.is_stopped() {
+							tokio::time::sleep(Duration::from_millis(100)).await;
+						}
+					} => {}
+				}
+			});
 
 			loop {
 				if stop_state.is_stopped() {
-					close_handle.close();
+					let _ = close_handle.try_send(());
 					break;
 				}
 
@@ -393,28 +420,18 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 				}
 
 				if run_round || check_reorg {
-					let prev_tx_clone = prev_tx.clone();
 					let server_clone = server.clone();
 					rt.spawn(async move {
+						let server = server_clone.lock().await;
 						if check_reorg {
-							let tx = prev_tx_clone.lock().unwrap().clone();
-							if let Some(tx) = tx {
-								let result = server_clone.lock().await.check_reorg(&tx).await;
-								let mut prev_tx = prev_tx_clone.lock().unwrap();
-								*prev_tx = match result {
-									Ok(Some(tx)) => Some(tx),
-									_ => None,
-								};
+							if let Err(error) = server.check_pending().await {
+								log::error!("Pending swap check failed: {}", error);
 							}
 						}
 
 						if run_round {
-							match server_clone.lock().await.execute_round().await {
-								Ok(Some(tx)) => {
-									*prev_tx_clone.lock().unwrap() = Some(tx);
-								}
-								Ok(None) => {}
-								Err(e) => log::error!("Swap round failed: {}", e),
+							if let Err(error) = server.execute_round().await {
+								log::error!("Swap round failed: {}", error);
 							}
 						}
 					});

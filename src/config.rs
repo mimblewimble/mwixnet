@@ -1,35 +1,32 @@
 use core::num::NonZeroU32;
-use std::fs::File;
-use std::io::prelude::*;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::result::Result;
-
+use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_util::{file, ToHex, ZeroingString};
 use grin_wallet_util::OnionV3Address;
 use rand::{thread_rng, Rng};
 use ring::{aead, pbkdf2};
 use serde_derive::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::prelude::*;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::result::Result;
 use thiserror::Error;
 
-use grin_onion::crypto::dalek::DalekPublicKey;
 use grin_onion::crypto::secp::SecretKey;
+use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
 use grin_wallet_libwallet::mwixnet::{onion as grin_onion, MwixnetServerPublicKey};
 
 const GRIN_HOME: &str = ".grin";
+const MWIXNET_DATA_DIR: &str = "mwixnet_data";
 const NODE_FOREIGN_API_SECRET_FILE_NAME: &str = ".foreign_api_secret";
 const WALLET_OWNER_API_SECRET_FILE_NAME: &str = ".owner_api_secret";
 /// Default minimum Tor circuit build timeout in milliseconds.
-pub const DEFAULT_MIN_CIRCUIT_TIMEOUT_MS: i32 = 2_000;
+pub const DEFAULT_MIN_CIRCUIT_TIMEOUT_MS: i32 = 60_000;
 const CONFIG_HEADER: &str = "\
 # MWixnet server configuration
 # Wallet clients use the ordered X25519 onion keys printed at server startup.
 ";
-
-fn default_min_circuit_timeout_ms() -> i32 {
-	DEFAULT_MIN_CIRCUIT_TIMEOUT_MS
-}
 
 /// The decrypted server config to be passed around and used by the rest of the mwixnet code
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -51,23 +48,105 @@ pub struct ServerConfig {
 	/// whether to collect excess hop fees in the server wallet
 	pub collect_fees: bool,
 	/// minimum Tor circuit build timeout in milliseconds
-	#[serde(default = "default_min_circuit_timeout_ms")]
 	pub min_circuit_timeout_ms: i32,
+	/// The directory in which mwixnet data files are stored
+	pub data_dir: String,
 	/// Ed25519 identity key of the previous mix/swap server (e.g. N_1 if this is N_2)
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
-	pub prev_server: Option<DalekPublicKey>,
+	pub prev_server: Option<MwixnetServerIdentityKey>,
 	/// Ed25519 identity key of the next mix server
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
-	pub next_server: Option<DalekPublicKey>,
+	pub next_server: Option<MwixnetServerIdentityKey>,
+}
+
+/// Public protocol settings for clients.
+#[derive(Clone, Debug, Serialize)]
+pub struct ServerInfo {
+	pub network: String,
+	pub role: String,
+	pub version: &'static str,
+	pub round_interval_s: Option<u32>,
+	pub minimum_fee: u64,
+	pub uptime_s: u64,
+}
+
+/// Public information available from this server's configuration.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct PublicRoute {
+	pub network: String,
+	pub server: PublicServer,
+	pub next: Option<PublicPeer>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct PublicServer {
+	pub role: String,
+	pub onion_address: String,
+	pub identity_key: String,
+	pub onion_key: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct PublicPeer {
+	pub onion_address: String,
+	pub identity_key: String,
 }
 
 impl ServerConfig {
+	fn network() -> &'static str {
+		match grin_core::global::get_chain_type() {
+			ChainTypes::Mainnet => "mainnet",
+			ChainTypes::Testnet => "testnet",
+			ChainTypes::UserTesting => "user_testing",
+			ChainTypes::AutomatedTesting => "automated_testing",
+		}
+	}
+
+	fn role(&self) -> &'static str {
+		if self.prev_server.is_some() {
+			"mixer"
+		} else {
+			"swap"
+		}
+	}
+
+	pub fn server_info(&self, uptime_s: u64) -> ServerInfo {
+		let swap = self.prev_server.is_none();
+		ServerInfo {
+			network: Self::network().into(),
+			role: self.role().into(),
+			version: env!("CARGO_PKG_VERSION"),
+			uptime_s,
+			round_interval_s: if swap { Some(self.interval_s) } else { None },
+			minimum_fee: crate::tx::minimum_hop_fee(swap),
+		}
+	}
+
+	pub fn public_route(&self) -> PublicRoute {
+		PublicRoute {
+			network: Self::network().into(),
+			server: PublicServer {
+				role: self.role().into(),
+				onion_address: format!("{}.onion", self.onion_address()),
+				identity_key: self.server_pubkey().to_hex(),
+				onion_key: self.onion_pubkey().to_hex(),
+			},
+			next: self.next_server.as_ref().map(|key| PublicPeer {
+				onion_address: format!(
+					"{}.onion",
+					OnionV3Address::from_bytes(key.as_ref().to_bytes())
+				),
+				identity_key: key.to_hex(),
+			}),
+		}
+	}
+
 	pub fn onion_address(&self) -> OnionV3Address {
 		OnionV3Address::from_private(&self.key.0).unwrap()
 	}
 
-	pub fn server_pubkey(&self) -> DalekPublicKey {
-		DalekPublicKey::from_secret(&self.key)
+	pub fn server_pubkey(&self) -> MwixnetServerIdentityKey {
+		MwixnetServerIdentityKey::from_secret(&self.key)
 	}
 
 	pub fn onion_pubkey(&self) -> MwixnetServerPublicKey {
@@ -185,7 +264,7 @@ impl EncryptedServerKey {
 			encrypted_seed.pop();
 		}
 
-		let secp = secp256k1zkp::Secp256k1::new();
+		let secp = grin_util::secp::Secp256k1::new();
 		let decrypted = SecretKey::from_slice(&secp, &encrypted_seed)
 			.map_err(|_| ConfigError::InvalidServerKey)?;
 		Ok(decrypted)
@@ -205,12 +284,12 @@ struct RawConfig {
 	wallet_owner_url: String,
 	wallet_owner_secret_path: Option<String>,
 	collect_fees: bool,
-	#[serde(default = "default_min_circuit_timeout_ms")]
 	min_circuit_timeout_ms: i32,
+	data_dir: Option<String>,
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
-	prev_server: Option<DalekPublicKey>,
+	prev_server: Option<MwixnetServerIdentityKey>,
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
-	next_server: Option<DalekPublicKey>,
+	next_server: Option<MwixnetServerIdentityKey>,
 }
 
 fn config_comment(key: &str) -> Option<&'static str> {
@@ -286,6 +365,7 @@ pub fn write_config(
 		wallet_owner_secret_path: server_config.wallet_owner_secret_path.clone(),
 		collect_fees: server_config.collect_fees,
 		min_circuit_timeout_ms: server_config.min_circuit_timeout_ms,
+		data_dir: Some(server_config.data_dir.clone()),
 		prev_server: server_config.prev_server.clone(),
 		next_server: server_config.next_server.clone(),
 	};
@@ -323,6 +403,12 @@ pub fn load_config(
 		wallet_owner_secret_path: raw_config.wallet_owner_secret_path,
 		collect_fees: raw_config.collect_fees,
 		min_circuit_timeout_ms: raw_config.min_circuit_timeout_ms,
+		data_dir: raw_config.data_dir.unwrap_or_else(|| {
+			mwixnet_data_path(&global::get_chain_type())
+				.to_str()
+				.unwrap()
+				.to_string()
+		}),
 		prev_server: raw_config.prev_server,
 		next_server: raw_config.next_server,
 	})
@@ -347,6 +433,12 @@ pub fn wallet_owner_secret_path(chain_type: &ChainTypes) -> PathBuf {
 	path
 }
 
+pub fn mwixnet_data_path(chain_type: &ChainTypes) -> PathBuf {
+	let mut path = get_grin_path(chain_type);
+	path.push(MWIXNET_DATA_DIR);
+	path
+}
+
 pub fn grin_node_url(chain_type: &ChainTypes) -> String {
 	if *chain_type == ChainTypes::Testnet {
 		"127.0.0.1:13413".into()
@@ -364,15 +456,15 @@ pub mod test_util {
 	use super::grin_onion;
 	use std::net::TcpListener;
 
-	use grin_onion::crypto::dalek::DalekPublicKey;
-	use secp256k1zkp::SecretKey;
-
 	use crate::config::{ServerConfig, DEFAULT_MIN_CIRCUIT_TIMEOUT_MS};
+	use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
+	use grin_util::secp::SecretKey;
+	use rand::{thread_rng, Rng};
 
 	pub fn local_config(
 		server_key: &SecretKey,
-		prev_server: &Option<DalekPublicKey>,
-		next_server: &Option<DalekPublicKey>,
+		prev_server: &Option<MwixnetServerIdentityKey>,
+		next_server: &Option<MwixnetServerIdentityKey>,
 	) -> Result<ServerConfig, Box<dyn std::error::Error>> {
 		let config = ServerConfig {
 			key: server_key.clone(),
@@ -384,6 +476,11 @@ pub mod test_util {
 			wallet_owner_secret_path: None,
 			collect_fees: true,
 			min_circuit_timeout_ms: DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
+			data_dir: std::env::temp_dir()
+				.join(format!("mwixnet_data_{}", thread_rng().gen::<u64>()))
+				.to_str()
+				.unwrap()
+				.into(),
 			prev_server: prev_server.clone(),
 			next_server: next_server.clone(),
 		};
@@ -397,6 +494,46 @@ mod tests {
 	use grin_onion::crypto::secp;
 
 	use super::*;
+
+	#[test]
+	fn public_route() {
+		grin_core::global::set_local_chain_type(ChainTypes::Testnet);
+		let first = secp::random_secret(false);
+		let second = secp::random_secret(false);
+		let swap = test_util::local_config(
+			&first,
+			&None,
+			&Some(MwixnetServerIdentityKey::from_secret(&second)),
+		)
+		.unwrap();
+		let mixer = test_util::local_config(&second, &Some(swap.server_pubkey()), &None).unwrap();
+		let info = swap.server_info(0);
+		assert_eq!(info.network, "testnet");
+		assert_eq!(info.minimum_fee, 12_500_000);
+		assert_eq!(info.round_interval_s, Some(swap.interval_s));
+		assert_eq!(mixer.server_info(0).minimum_fee, 1_500_000);
+		assert_eq!(mixer.server_info(0).round_interval_s, None);
+		let route = swap.public_route();
+		assert_eq!(route.server.role, "swap");
+		assert_eq!(route.server.onion_key, swap.onion_pubkey().to_hex());
+		assert_eq!(
+			route.next.as_ref().unwrap().identity_key,
+			mixer.server_pubkey().to_hex()
+		);
+		assert_eq!(
+			route.next.as_ref().unwrap().onion_address,
+			mixer.public_route().server.onion_address
+		);
+		assert_eq!(mixer.public_route().server.role, "mixer");
+		assert!(mixer.public_route().next.is_none());
+		let value = serde_json::to_value(route).unwrap();
+		assert_eq!(value.as_object().unwrap().len(), 3);
+		assert_eq!(value["server"].as_object().unwrap().len(), 4);
+		assert_eq!(value["next"].as_object().unwrap().len(), 2);
+		let mut changed = swap.clone();
+		changed.next_server = None;
+		assert!(changed.public_route().next.is_none());
+	}
 
 	#[test]
 	fn server_key_encrypt() {
@@ -451,12 +588,6 @@ mod tests {
 		write_config(&path, &config, &password).unwrap();
 		let contents = std::fs::read_to_string(&path).unwrap();
 		let loaded = load_config(&path, &password).unwrap();
-		std::fs::write(
-			&path,
-			contents.replace("min_circuit_timeout_ms = 2000\n", ""),
-		)
-		.unwrap();
-		let legacy_loaded = load_config(&path, &password).unwrap();
 		std::fs::remove_file(path).unwrap();
 
 		assert!(contents.contains("# Seconds between mixing rounds.\ninterval_s ="));
@@ -464,9 +595,10 @@ mod tests {
 		assert!(contents.contains(
 			"# Collect excess hop fees in the wallet; false pays all hop fees to miners.\ncollect_fees ="
 		));
-		assert!(contents.contains(
-			"# Minimum Tor circuit build timeout in milliseconds.\nmin_circuit_timeout_ms = 2000"
-		));
+		assert!(contents.contains(&format!(
+			"# Minimum Tor circuit build timeout in milliseconds.\nmin_circuit_timeout_ms = {}",
+			DEFAULT_MIN_CIRCUIT_TIMEOUT_MS
+		)));
 		assert!(contents.contains(
 			"# Previous server Ed25519 identity key; setting it makes this server a mixer.\n# prev_server ="
 		));
@@ -474,9 +606,5 @@ mod tests {
 			"# Next server Ed25519 identity key; leave unset for the final hop.\n# next_server ="
 		));
 		assert_eq!(loaded, config);
-		assert_eq!(
-			legacy_loaded.min_circuit_timeout_ms,
-			DEFAULT_MIN_CIRCUIT_TIMEOUT_MS
-		);
 	}
 }

@@ -10,7 +10,7 @@ use serde_json::json;
 use thiserror::Error;
 use tor_rtcompat::Runtime;
 
-use grin_onion::crypto::dalek::{self, DalekPublicKey};
+use grin_onion::crypto::dalek::{self, MwixnetServerIdentityKey};
 use grin_onion::onion::Onion;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
@@ -40,8 +40,7 @@ pub enum MixClientError {
 #[async_trait]
 pub trait MixClient: Send + Sync {
 	/// Swaps the outputs provided and returns the final swapped outputs and kernels.
-	#[allow(clippy::ptr_arg, reason = "Grin serialization requires Vec")]
-	async fn mix_outputs(&self, onions: &Vec<Onion>) -> Result<MixResp, MixClientError>;
+	async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError>;
 }
 
 pub struct MixClientImpl<R: Runtime> {
@@ -54,7 +53,7 @@ impl<R: Runtime> MixClientImpl<R> {
 	pub fn new(
 		config: ServerConfig,
 		tor: Arc<grin_util::Mutex<TorService<R>>>,
-		next_pubkey: DalekPublicKey,
+		next_pubkey: MwixnetServerIdentityKey,
 	) -> Self {
 		let addr = OnionV3Address::from_bytes(next_pubkey.as_ref().to_bytes());
 		MixClientImpl { config, tor, addr }
@@ -96,11 +95,12 @@ impl<R: Runtime> MixClientImpl<R> {
 
 #[async_trait]
 impl<R: Runtime> MixClient for MixClientImpl<R> {
-	async fn mix_outputs(&self, onions: &Vec<Onion>) -> Result<MixResp, MixClientError> {
+	async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError> {
+		let onions = onions.to_vec();
 		let serialized = ser::ser_vec(&onions, ProtocolVersion::local()).unwrap();
 		let sig =
 			dalek::sign(&self.config.key, serialized.as_slice()).map_err(MixClientError::Dalek)?;
-		let mix = MixReq::new(onions.clone(), sig);
+		let mix = MixReq::new(onions, sig);
 
 		self.async_send_json_request::<MixResp>(&self.addr, "mix", &json!([mix]))
 			.await
@@ -124,12 +124,6 @@ pub mod mock {
 		results: HashMap<Vec<Onion>, MixResp>,
 	}
 
-	impl Default for MockMixClient {
-		fn default() -> Self {
-			Self::new()
-		}
-	}
-
 	impl MockMixClient {
 		pub fn new() -> MockMixClient {
 			MockMixClient {
@@ -138,13 +132,19 @@ pub mod mock {
 		}
 
 		pub fn set_response(&mut self, onions: &[Onion], r: MixResp) {
-			self.results.insert(onions.to_vec(), r);
+			self.results.insert(onions.to_owned(), r);
+		}
+	}
+
+	impl Default for MockMixClient {
+		fn default() -> Self {
+			Self::new()
 		}
 	}
 
 	#[async_trait]
 	impl MixClient for MockMixClient {
-		async fn mix_outputs(&self, onions: &Vec<Onion>) -> Result<MixResp, MixClientError> {
+		async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError> {
 			self.results
 				.get(onions)
 				.map(|r| Ok(r.clone()))
@@ -164,7 +164,7 @@ pub mod test_util {
 	use grin_core::ser;
 	use grin_core::ser::ProtocolVersion;
 
-	use grin_onion::crypto::dalek::{self, DalekPublicKey};
+	use grin_onion::crypto::dalek::{self, MwixnetServerIdentityKey};
 	use grin_onion::crypto::secp::SecretKey;
 	use grin_onion::onion::Onion;
 
@@ -183,17 +183,18 @@ pub mod test_util {
 
 	#[async_trait]
 	impl MixClient for DirectMixClient {
-		async fn mix_outputs(&self, onions: &Vec<Onion>) -> Result<MixResp, MixClientError> {
+		async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError> {
+			let onions = onions.to_vec();
 			let serialized = ser::ser_vec(&onions, ProtocolVersion::local()).unwrap();
 			let sig =
 				dalek::sign(&self.key, serialized.as_slice()).map_err(MixClientError::Dalek)?;
 
 			sig.verify(
-				&DalekPublicKey::from_secret(&self.key),
+				&MwixnetServerIdentityKey::from_secret(&self.key),
 				serialized.as_slice(),
 			)
 			.unwrap();
-			Ok(self.mix_server.mix_outputs(onions, &sig).await.unwrap())
+			Ok(self.mix_server.mix_outputs(&onions, &sig).await.unwrap())
 		}
 	}
 }

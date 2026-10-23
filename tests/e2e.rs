@@ -138,6 +138,14 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 		assert_eq!(user1_wallet_info.amount_currently_spendable, 9_850_000_000);
 		assert_eq!(user1_wallet_info.amount_locked, 0);
 
+		// Save the confirmation before the reorg
+		assert!(servers
+			.swapper
+			.async_check_reorg(&tx)
+			.await
+			.unwrap()
+			.is_some());
+
 		let node2 = nodes.new_node();
 		let node2_server = node2.lock().start();
 		copy_blocks(&node1_server.chain, &node2_server.chain, 1, fork_height);
