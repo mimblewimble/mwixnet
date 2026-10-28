@@ -43,10 +43,6 @@ fn set_timeout_floor(config: &mut TorClientConfigBuilder, timeout_ms: i32) {
 /// Tor error types
 #[derive(Error, Debug)]
 pub enum TorError {
-	#[error("Error generating config: {0:?}")]
-	ConfigError(grin_wallet_impls::Error),
-	#[error("Error starting process: {0:?}")]
-	ProcessError(grin_wallet_impls::tor::process::Error),
 	#[error("Tor request failed: {0}")]
 	RequestError(String),
 	#[error("Tor request timed out")]
