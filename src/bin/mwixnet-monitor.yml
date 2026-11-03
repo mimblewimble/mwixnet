@@ -2,13 +2,11 @@ name: mwixnet-monitor
 about: Check onion health every two minutes
 
 args:
-  - data_dir:
-      help: Tor data directory separate from the servers
-      long: data_dir
-      short: d
-      value_name: DIR
+  - config_file:
+      help: Path to load/save the mwixnet-config.toml configuration file
+      short: c
+      long: config_file
       takes_value: true
-      required: false
   - once:
       help: Check once and exit with an error if any target fails
       long: once

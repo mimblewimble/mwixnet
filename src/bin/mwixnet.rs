@@ -7,22 +7,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::{sleep, spawn};
 use std::time::Duration;
-use tor_rtcompat::PreferredRuntime;
 
 use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_onion::crypto;
 use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
+use grin_p2p::tor::ov3::OnionV3Address;
 use grin_util::{StopState, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
-use grin_wallet_util::OnionV3Address;
-use mwixnet::config::{self, ServerConfig};
+use mwixnet::config::{self, ServerConfig, TorMwixnetConfig};
 use mwixnet::mix_client::{MixClient, MixClientImpl};
 use mwixnet::node::GrinNode;
 use mwixnet::node::HttpGrinNode;
 use mwixnet::servers;
 use mwixnet::store::SwapStore;
-use mwixnet::tor;
 use mwixnet::wallet::{HttpWallet, Wallet};
 
 const DEFAULT_INTERVAL: u32 = 12 * 60 * 60;
@@ -153,7 +151,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 					.map(|p| p.to_owned()),
 			},
 			collect_fees: !no_fee_collection,
-			min_circuit_timeout_ms: config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
 			data_dir: match data_dir {
 				Some(p) => p.to_owned().replace("\\", "/"),
 				None => config::mwixnet_data_path(&chain_type)
@@ -163,6 +160,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			},
 			prev_server,
 			next_server,
+			tor: TorMwixnetConfig::default(),
 		};
 
 		let password = server_password(server_pass_file, true)?;
@@ -306,33 +304,17 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		None
 	};
 
-	let tor_runtime = rt_handle.block_on(async { PreferredRuntime::current() })?;
-	tor_log_ratelim::install_runtime(tor_runtime.clone())?;
-
-	let tor_instance =
-		rt_handle.block_on(tor::async_init_tor(tor_runtime.clone(), &server_config))?;
-	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
-	let tor_clone = tor_instance.clone();
-
 	let stop_state = Arc::new(StopState::new());
 	let stop_state_clone = stop_state.clone();
 
 	rt_handle.spawn(async move {
 		build_signals_fut().await;
-		match tokio::task::spawn_blocking(move || tor_clone.lock().stop()).await {
-			Ok(Ok(())) => {}
-			Ok(Err(error)) => eprintln!("Could not stop Tor service cleanly: {error}"),
-			Err(error) => eprintln!("Tor shutdown task failed: {error}"),
-		}
 		stop_state_clone.stop();
 	});
 
 	let next_mixer: Option<Arc<dyn MixClient>> = server_config.next_server.clone().map(|pk| {
-		let client: Arc<dyn MixClient> = Arc::new(MixClientImpl::new(
-			server_config.clone(),
-			tor_instance.clone(),
-			pk.clone(),
-		));
+		let client: Arc<dyn MixClient> =
+			Arc::new(MixClientImpl::new(server_config.clone(), pk.clone()).unwrap());
 		client
 	});
 

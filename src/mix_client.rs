@@ -1,31 +1,44 @@
-use std::sync::Arc;
+// Copyright 2026 The Grin Developers
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use async_trait::async_trait;
+use crate::config::{ServerConfig, TorMwixnetConfig};
+use crate::http::HttpError;
+use crate::servers::mix_rpc::{MixReq, MixResp};
+
 use grin_api::json_rpc::{build_request, Response};
 use grin_core::ser;
 use grin_core::ser::ProtocolVersion;
-use grin_wallet_util::OnionV3Address;
-use serde_json;
-use serde_json::json;
-use thiserror::Error;
-use tor_rtcompat::Runtime;
-
 use grin_onion::crypto::dalek::{self, MwixnetServerIdentityKey};
 use grin_onion::onion::Onion;
+use grin_p2p::tor::ov3::OnionV3Address;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
-use crate::config::ServerConfig;
-use crate::servers::mix_rpc::{MixReq, MixResp};
-use crate::tor::TorService;
-use crate::{http, tor};
+use async_trait::async_trait;
+use grin_p2p::tor::process::types::TorProcess;
+use grin_p2p::tor::{start_tor, TorHttpClient};
+use serde_json;
+use serde_json::json;
+use std::collections::HashMap;
+use thiserror::Error;
 
 /// Error types for interacting with nodes
 #[derive(Error, Debug)]
 pub enum MixClientError {
 	#[error("Tor Error: {0:?}")]
-	Tor(tor::TorError),
+	Tor(grin_p2p::tor::Error),
 	#[error("Communication Error: {0:?}")]
-	CommError(http::HttpError),
+	CommError(HttpError),
 	#[error("Dalek Error: {0:?}")]
 	Dalek(dalek::DalekError),
 	#[error("Error decoding JSON response: {0:?}")]
@@ -43,39 +56,52 @@ pub trait MixClient: Send + Sync {
 	async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError>;
 }
 
-pub struct MixClientImpl<R: Runtime> {
+pub struct MixClientImpl {
 	config: ServerConfig,
-	tor: Arc<grin_util::Mutex<TorService<R>>>,
 	addr: OnionV3Address,
+	tor_process: Option<TorProcess>,
 }
 
-impl<R: Runtime> MixClientImpl<R> {
-	pub fn new(
-		config: ServerConfig,
-		tor: Arc<grin_util::Mutex<TorService<R>>>,
-		next_pubkey: MwixnetServerIdentityKey,
-	) -> Self {
-		let addr = OnionV3Address::from_bytes(next_pubkey.as_ref().to_bytes());
-		MixClientImpl { config, tor, addr }
+impl TorHttpClient<TorMwixnetConfig> for MixClientImpl {
+	fn tor_config(&self) -> &TorMwixnetConfig {
+		&self.config.tor
 	}
 
-	async fn async_send_json_request<D: serde::de::DeserializeOwned>(
+	fn tor_process(&self) -> Option<&TorProcess> {
+		self.tor_process.as_ref()
+	}
+}
+
+impl MixClientImpl {
+	pub fn new(
+		config: ServerConfig,
+		next_pubkey: MwixnetServerIdentityKey,
+	) -> Result<Self, MixClientError> {
+		let addr = OnionV3Address::from_bytes(next_pubkey.as_ref().to_bytes());
+		let tor_process = start_tor(&config.tor).map_err(MixClientError::Tor)?;
+		Ok(MixClientImpl {
+			config,
+			addr,
+			tor_process,
+		})
+	}
+
+	fn send_json_request<D: serde::de::DeserializeOwned>(
 		&self,
-		addr: &OnionV3Address,
 		method: &str,
 		params: &serde_json::Value,
 	) -> Result<D, MixClientError> {
-		let url = format!("{}/v1", addr.to_http_str());
-		let request_str = serde_json::to_string(&build_request(method, params)).unwrap();
-		let tor_client = self
-			.tor
-			.lock()
-			.client()
-			.ok_or_else(|| MixClientError::Custom("Tor client is not running".into()))?;
-		let res = tor::async_post(tor_client, &url, request_str)
-			.await
-			.map_err(MixClientError::Tor)?;
+		let url = format!("{}/v1", self.addr.to_http_str());
 
+		let mut headers = HashMap::new();
+		headers.insert("accept", "application/json");
+		headers.insert("content-type", "application/json");
+
+		let request_str = serde_json::to_string(&build_request(method, params)).unwrap();
+
+		let res = self
+			.post(&url, Some(headers), request_str)
+			.map_err(MixClientError::Tor)?;
 		let response: Response =
 			serde_json::from_str(&res).map_err(MixClientError::DecodeResponseError)?;
 
@@ -94,16 +120,14 @@ impl<R: Runtime> MixClientImpl<R> {
 }
 
 #[async_trait]
-impl<R: Runtime> MixClient for MixClientImpl<R> {
+impl MixClient for MixClientImpl {
 	async fn mix_outputs(&self, onions: &[Onion]) -> Result<MixResp, MixClientError> {
 		let onions = onions.to_vec();
 		let serialized = ser::ser_vec(&onions, ProtocolVersion::local()).unwrap();
 		let sig =
 			dalek::sign(&self.config.key, serialized.as_slice()).map_err(MixClientError::Dalek)?;
 		let mix = MixReq::new(onions, sig);
-
-		self.async_send_json_request::<MixResp>(&self.addr, "mix", &json!([mix]))
-			.await
+		self.send_json_request::<MixResp>("mix", &json!([mix]))
 	}
 }
 
