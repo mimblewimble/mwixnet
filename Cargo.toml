@@ -60,5 +60,6 @@ grin_wallet_libwallet = { path = "grin-wallet/libwallet" }
 grin_wallet_util = { path = "grin-wallet/util" }
 
 [dev-dependencies]
+tempfile = "3"
 grin_wallet_libwallet = { path = "grin-wallet/libwallet", features = ["mwixnet-test"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }

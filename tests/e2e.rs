@@ -17,16 +17,13 @@ use crate::common::wallet::GrinWalletManager;
 
 mod common;
 
-/// Just removes all results from previous runs
-fn clean_all_output(test_dir: &str) {
-	if let Err(e) = remove_dir_all::remove_dir_all(test_dir) {
-		println!("can't remove output from previous test :{}, may be ok", e);
-	}
-}
-
-fn setup_test(test_name: &str) -> (GrinNodeManager, GrinWalletManager, String) {
-	let test_dir = format!("./target/tmp/.{}", test_name);
-	clean_all_output(test_dir.as_str());
+fn setup_test(test_name: &str) -> (GrinNodeManager, GrinWalletManager, tempfile::TempDir) {
+	// Avoid checkout permissions affecting Tor
+	let test_dir = tempfile::Builder::new()
+		.prefix(test_name)
+		.tempdir()
+		.unwrap();
+	let test_path = test_dir.path().to_str().unwrap();
 
 	let logger = LoggingConfig {
 		log_to_file: false,
@@ -38,8 +35,8 @@ fn setup_test(test_name: &str) -> (GrinNodeManager, GrinWalletManager, String) {
 	global::set_local_accept_fee_base(50_000_000);
 	global::init_global_chain_type(global::ChainTypes::AutomatedTesting);
 
-	let nodes = GrinNodeManager::new(test_dir.as_str());
-	let wallets = GrinWalletManager::new(test_dir.as_str());
+	let nodes = GrinNodeManager::new(test_path);
+	let wallets = GrinWalletManager::new(test_path);
 
 	(nodes, wallets, test_dir)
 }
@@ -69,7 +66,7 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 	// Setup swap & mix servers and their wallets
 	let rt_handle = rt.handle().clone();
 	let mut servers = rt.block_on(Servers::async_setup(
-		test_dir.as_str(),
+		test_dir.path().to_str().unwrap(),
 		&rt_handle,
 		&mut wallets,
 		&node1,
