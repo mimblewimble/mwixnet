@@ -127,6 +127,17 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			);
 		}
 
+		let data_dir = match data_dir {
+			Some(p) => p.to_owned().replace("\\", "/"),
+			None => config::mwixnet_data_path(&chain_type)
+				.to_str()
+				.unwrap()
+				.to_owned(),
+		};
+		let tor_config = TorMwixnetConfig {
+			data_file_dir: data_dir.clone(),
+			..Default::default()
+		};
 		let server_config = ServerConfig {
 			key: crypto::secp::random_secret(false),
 			interval_s: round_time.unwrap_or(DEFAULT_INTERVAL),
@@ -152,16 +163,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 					.map(|p| p.to_owned()),
 			},
 			collect_fees: !no_fee_collection,
-			data_dir: match data_dir {
-				Some(p) => p.to_owned().replace("\\", "/"),
-				None => config::mwixnet_data_path(&chain_type)
-					.to_str()
-					.unwrap()
-					.to_owned(),
-			},
+			data_dir,
 			prev_server,
 			next_server,
-			tor: TorMwixnetConfig::default(),
+			tor: tor_config,
 		};
 
 		let password = server_password(server_pass_file, true)?;

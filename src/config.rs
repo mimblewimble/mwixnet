@@ -511,11 +511,6 @@ pub fn write_config(
 ) -> Result<(), ConfigError> {
 	let encrypted = EncryptedServerKey::from_secret_key(&server_config.key, password);
 
-	let tor_config = TorMwixnetConfig {
-		data_file_dir: server_config.data_dir.clone(),
-		..Default::default()
-	};
-
 	let raw_config = RawConfig {
 		encrypted_key: encrypted.encrypted_key,
 		salt: encrypted.salt,
@@ -530,7 +525,7 @@ pub fn write_config(
 		data_dir: Some(server_config.data_dir.clone()),
 		prev_server: server_config.prev_server.clone(),
 		next_server: server_config.next_server.clone(),
-		tor: Some(tor_config),
+		tor: Some(server_config.tor.clone()),
 	};
 	let encoded = documented_config(&raw_config)?;
 
