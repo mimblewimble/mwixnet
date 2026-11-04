@@ -241,6 +241,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	// Override data_dir, if supplied
 	if let Some(path) = data_dir {
 		server_config.data_dir = path.to_owned().replace("\\", "/");
+		server_config.tor.data_file_dir = server_config.data_dir.to_owned();
 	}
 
 	// Override grin_node_foreign_api_secret_path, if supplied
