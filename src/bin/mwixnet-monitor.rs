@@ -68,9 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	}
 	config.data_file_dir = grin_path.to_str().unwrap().into();
 
-	println!("Starting Tor");
+	eprintln!("Starting Tor");
 	start_tor(&config)?;
-	println!("Tor started successfully");
+	eprintln!("Tor started successfully");
 
 	tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
