@@ -22,7 +22,6 @@ use grin_core::ser::ProtocolVersion;
 use grin_onion::crypto::dalek::{self, MwixnetServerIdentityKey};
 use grin_onion::onion::Onion;
 use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::process::types::TorProcess;
 use grin_p2p::tor::{start_onion_service, TorHttpClient};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
@@ -60,16 +59,11 @@ pub trait MixClient: Send + Sync {
 pub struct MixClientImpl {
 	config: ServerConfig,
 	addr: OnionV3Address,
-	tor_process: Option<TorProcess>,
 }
 
 impl TorHttpClient<TorMwixnetConfig> for MixClientImpl {
 	fn tor_config(&self) -> &TorMwixnetConfig {
 		&self.config.tor
-	}
-
-	fn tor_process(&self) -> Option<&TorProcess> {
-		self.tor_process.as_ref()
 	}
 }
 
@@ -79,18 +73,14 @@ impl MixClientImpl {
 		next_pubkey: MwixnetServerIdentityKey,
 	) -> Result<Self, MixClientError> {
 		let addr = OnionV3Address::from_bytes(next_pubkey.as_ref().to_bytes());
-		let tor_process = start_onion_service(
+		start_onion_service(
 			config.key.clone(),
 			config.addr.to_string().as_str(),
 			PathBuf::from(&config.tor.data_file_dir),
 			&config.tor,
 		)
 		.map_err(MixClientError::Tor)?;
-		Ok(MixClientImpl {
-			config,
-			addr,
-			tor_process,
-		})
+		Ok(MixClientImpl { config, addr })
 	}
 
 	fn send_json_request<D: serde::de::DeserializeOwned>(

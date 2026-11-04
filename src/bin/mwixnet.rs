@@ -328,7 +328,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			server_config.onion_pubkey().to_hex()
 		);
 
-		let _tor_process = start_tor(&server_config.tor)?;
+		start_tor(&server_config.tor)?;
 		start_onion_service(
 			server_config.key.clone(),
 			server_config.addr.to_string().as_str(),

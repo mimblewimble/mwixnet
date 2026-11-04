@@ -23,10 +23,10 @@ use std::sync::Arc;
 
 use grin_api::{client, json_rpc};
 use grin_core::core::Transaction;
-use grin_p2p::tor::arti::stop_tor_service;
 use grin_p2p::tor::config::TorConfig;
 use grin_p2p::tor::ov3::OnionV3Address;
 use grin_p2p::tor::start_onion_service;
+use grin_p2p::tor::stop_onion_service;
 use grin_util::secp::SecretKey;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
@@ -302,12 +302,12 @@ impl Servers {
 
 	pub fn stop_all(&mut self) {
 		let swapper_address: OnionV3Address = self.swapper.onion_address.clone();
-		stop_tor_service(swapper_address.to_string()).expect("stop swap Tor service");
+		stop_onion_service(swapper_address.to_string()).expect("stop swap Tor service");
 
 		self.mixers.iter_mut().for_each(|mixer| {
 			let mixer_address: OnionV3Address =
 				OnionV3Address::from_private(&mixer.server_key.0).unwrap();
-			stop_tor_service(mixer_address.to_string()).expect("stop mixer Tor service");
+			stop_onion_service(mixer_address.to_string()).expect("stop mixer Tor service");
 		});
 	}
 }
