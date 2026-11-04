@@ -65,13 +65,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	};
 
 	// Set Tor data path.
-	let mut grin_path = dirs::home_dir().unwrap_or_default();
-	grin_path.push(GRIN_HOME);
-	grin_path.push("mwixnet-monitor");
-	if !grin_path.exists() {
-		std::fs::create_dir_all(grin_path.clone())?;
-	}
-	config.data_file_dir = grin_path.to_str().unwrap().into();
+	let data_dir = match args.value_of("data_dir") {
+		Some(value) => PathBuf::from(value),
+		None => {
+			let mut grin_path = dirs::home_dir().unwrap_or_default();
+			grin_path.push(GRIN_HOME);
+			grin_path.push("mwixnet-monitor");
+			grin_path
+		}
+	};
+	config.data_file_dir = data_dir.to_str().unwrap().into();
 
 	eprintln!("Starting Tor");
 	start_tor(&config)?;
