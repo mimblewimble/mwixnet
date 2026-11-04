@@ -411,8 +411,8 @@ fn config_comment(key: &str) -> Option<&'static str> {
 		"socks_proxy_addr" => Some("The address of the socks proxy for external process."),
 		"data_dir" => Some("Where to find data files."),
 		"data_file_dir" => Some("Tor data directory."),
-		"request_timeout_secs" => Some("Whether to use integrated Tor library."),
-		"bootstrap_timeout_secs" => Some("Whether to use integrated Tor library."),
+		"request_timeout_secs" => Some("Total timeout for request in seconds."),
+		"bootstrap_timeout_secs" => Some("Timeout for bootstrap in seconds."),
 		"min_circuit_timeout_ms" => Some("Minimum Tor circuit build timeout in milliseconds."),
 		"[tor.bridge]" => Some("
 
