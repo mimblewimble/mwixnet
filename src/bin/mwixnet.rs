@@ -12,9 +12,9 @@ use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_onion::crypto;
 use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
-use grin_p2p::tor::arti::start_tor_service;
+use grin_p2p::tor::config::TorConfig;
 use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::start_tor;
+use grin_p2p::tor::{start_onion_service, start_tor};
 use grin_util::{StopState, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use mwixnet::config::{self, ServerConfig, TorMwixnetConfig};
@@ -329,9 +329,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		);
 
 		let _tor_process = start_tor(&server_config.tor)?;
-		start_tor_service(
+		start_onion_service(
 			server_config.key.clone(),
 			server_config.addr.to_string().as_str(),
+			server_config.tor.data_dir(),
 			&server_config.tor,
 		)?;
 
