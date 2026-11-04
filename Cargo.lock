@@ -2542,6 +2542,7 @@ name = "grin_p2p"
 version = "5.5.2"
 dependencies = [
  "arti-client",
+ "async-trait",
  "base64 0.12.3",
  "bitflags 1.3.2",
  "built",
@@ -2710,6 +2711,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 
@@ -2764,6 +2766,7 @@ dependencies = [
 name = "grin_wallet_impls"
 version = "5.5.1"
 dependencies = [
+ "async-trait",
  "blake2-rfc",
  "chrono",
  "futures 0.3.34",

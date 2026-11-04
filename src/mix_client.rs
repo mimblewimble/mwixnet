@@ -72,7 +72,7 @@ impl MixClientImpl {
 		MixClientImpl { config, addr }
 	}
 
-	fn send_json_request<D: serde::de::DeserializeOwned>(
+	async fn send_json_request<D: serde::de::DeserializeOwned>(
 		&self,
 		method: &str,
 		params: &serde_json::Value,
@@ -87,6 +87,7 @@ impl MixClientImpl {
 
 		let res = self
 			.post(&url, Some(headers), request_str)
+			.await
 			.map_err(MixClientError::Tor)?;
 		let response: Response =
 			serde_json::from_str(&res).map_err(MixClientError::DecodeResponseError)?;
@@ -114,6 +115,7 @@ impl MixClient for MixClientImpl {
 			dalek::sign(&self.config.key, serialized.as_slice()).map_err(MixClientError::Dalek)?;
 		let mix = MixReq::new(onions, sig);
 		self.send_json_request::<MixResp>("mix", &json!([mix]))
+			.await
 	}
 }
 
