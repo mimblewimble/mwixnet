@@ -452,9 +452,9 @@ fn documented_config(raw_config: &RawConfig) -> Result<String, ConfigError> {
 			if let Some(comment) = config_comment(key.trim()) {
 				encoded.push_str("\n\n# ");
 				encoded.push_str(comment);
-				encoded.push('\n');
-				encoded.push_str(line);
 			}
+			encoded.push('\n');
+			encoded.push_str(line);
 		} else if line.contains('[') && line.contains(']') {
 			if line == "[tor]" {
 				encoded.push('\n');
