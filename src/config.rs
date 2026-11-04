@@ -488,7 +488,7 @@ fn documented_config(raw_config: &RawConfig) -> Result<String, ConfigError> {
 #transport = \"https\"
 
 #Proxy address, eg IP:PORT or Hostname
-#server = \"\"
+#address = \"\"
 
 #Username for the proxy server authentification
 #user = \"\"
