@@ -13,7 +13,7 @@ use grin_core::global::ChainTypes;
 use grin_onion::crypto;
 use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
 use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::start_onion_service;
+use grin_p2p::tor::{start_onion_service, stop_onion_service};
 use grin_util::{StopState, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use mwixnet::config::{self, ServerConfig, TorMwixnetConfig};
@@ -305,14 +305,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		None
 	};
 
-	let stop_state = Arc::new(StopState::new());
-	let stop_state_clone = stop_state.clone();
-
-	rt_handle.spawn(async move {
-		build_signals_fut().await;
-		stop_state_clone.stop();
-	});
-
+	// Start Tor service.
 	start_onion_service(
 		server_config.key.clone(),
 		server_config.addr.to_string().as_str(),
@@ -320,6 +313,16 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		&server_config.tor,
 	)
 	.map_err(MixClientError::Tor)?;
+
+	let stop_state = Arc::new(StopState::new());
+	let stop_state_clone = stop_state.clone();
+
+	let onion_address = server_config.onion_address().to_string();
+	rt_handle.spawn(async move {
+		build_signals_fut().await;
+		stop_onion_service(onion_address).unwrap_or_default();
+		stop_state_clone.stop();
+	});
 
 	let next_mixer: Option<Arc<dyn MixClient>> = server_config.next_server.clone().map(|pk| {
 		let client: Arc<dyn MixClient> =
