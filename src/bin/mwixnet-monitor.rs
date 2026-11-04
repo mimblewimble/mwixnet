@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use clap::{load_yaml, App, Error, ErrorKind};
+use hyper::Uri;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -34,8 +35,12 @@ fn target(value: &str) -> Result<(String, String), String> {
 	{
 		return Err("Use letters, numbers, '-' or '_' for the name".into());
 	}
-	OnionV3Address::try_from(address).map_err(|e| e.to_string())?;
-	Ok((name.into(), format!("http://{address}/v1")))
+	let url: Uri = address
+		.parse()
+		.map_err(|e| format!("Bad url format: {}", e))?;
+	let host = url.host().ok_or(format!("Bad url host for {}", address))?;
+	OnionV3Address::try_from(host).map_err(|e| e.to_string())?;
+	Ok((name.into(), format!("http://{host}/v1")))
 }
 
 fn healthy(body: &str) -> bool {
