@@ -33,7 +33,8 @@ impl log::Log for StderrLogger {
 		metadata.level() <= log::max_level()
 			&& (metadata.target().starts_with("mwixnet")
 				|| metadata.target().starts_with("arti_client")
-				|| metadata.target().starts_with("tor_"))
+				|| metadata.target().starts_with("tor_")
+				|| metadata.target().starts_with("grin_"))
 	}
 
 	fn log(&self, record: &log::Record<'_>) {
