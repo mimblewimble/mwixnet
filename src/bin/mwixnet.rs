@@ -12,13 +12,12 @@ use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_onion::crypto;
 use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
-use grin_p2p::tor::config::TorConfig;
 use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::{start_onion_service, start_tor};
+use grin_p2p::tor::start_onion_service;
 use grin_util::{StopState, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use mwixnet::config::{self, ServerConfig, TorMwixnetConfig};
-use mwixnet::mix_client::{MixClient, MixClientImpl};
+use mwixnet::mix_client::{MixClient, MixClientError, MixClientImpl};
 use mwixnet::node::GrinNode;
 use mwixnet::node::HttpGrinNode;
 use mwixnet::servers;
@@ -314,9 +313,17 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		stop_state_clone.stop();
 	});
 
+	start_onion_service(
+		server_config.key.clone(),
+		server_config.addr.to_string().as_str(),
+		PathBuf::from(&server_config.tor.data_file_dir),
+		&server_config.tor,
+	)
+	.map_err(MixClientError::Tor)?;
+
 	let next_mixer: Option<Arc<dyn MixClient>> = server_config.next_server.clone().map(|pk| {
 		let client: Arc<dyn MixClient> =
-			Arc::new(MixClientImpl::new(server_config.clone(), pk.clone()).unwrap());
+			Arc::new(MixClientImpl::new(server_config.clone(), pk.clone()));
 		client
 	});
 
@@ -327,14 +334,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			server_config.server_pubkey().to_hex(),
 			server_config.onion_pubkey().to_hex()
 		);
-
-		start_tor(&server_config.tor)?;
-		start_onion_service(
-			server_config.key.clone(),
-			server_config.addr.to_string().as_str(),
-			server_config.tor.data_dir(),
-			&server_config.tor,
-		)?;
 
 		let (_, http_server) = servers::mix_rpc::listen(
 			&rt_handle,

@@ -127,13 +127,10 @@ async fn async_new_swap_server(
 		rt_handle,
 		&server_config,
 		match next_server {
-			Some(s) => Some(Arc::new(
-				MixClientImpl::new(
-					server_config.clone(),
-					MwixnetServerIdentityKey::from_secret(&s.server_key),
-				)
-				.unwrap(),
-			)),
+			Some(s) => Some(Arc::new(MixClientImpl::new(
+				server_config.clone(),
+				MwixnetServerIdentityKey::from_secret(&s.server_key),
+			))),
 			None => None,
 		},
 		Some(wallet.lock().get_client()),
@@ -142,12 +139,13 @@ async fn async_new_swap_server(
 	)
 	.unwrap();
 
-	let _ = start_onion_service(
+	start_onion_service(
 		server_config.key.clone(),
 		rpc_server.address().to_string().as_str(),
 		server_config.tor.data_dir(),
 		&server_config.tor,
-	);
+	)
+	.unwrap();
 
 	IntegrationSwapServer {
 		onion_pubkey: server_config.onion_pubkey(),
@@ -199,13 +197,10 @@ async fn async_new_mix_server(
 		rt_handle,
 		server_config.clone(),
 		match next_server {
-			Some(s) => Some(Arc::new(
-				MixClientImpl::new(
-					server_config.clone(),
-					MwixnetServerIdentityKey::from_secret(&s.server_key),
-				)
-				.unwrap(),
-			)),
+			Some(s) => Some(Arc::new(MixClientImpl::new(
+				server_config.clone(),
+				MwixnetServerIdentityKey::from_secret(&s.server_key),
+			))),
 			None => None,
 		},
 		Some(wallet.lock().get_client()),
@@ -213,12 +208,13 @@ async fn async_new_mix_server(
 	)
 	.unwrap();
 
-	let _ = start_onion_service(
+	start_onion_service(
 		server_config.key.clone(),
 		rpc_server.address().to_string().as_str(),
 		server_config.tor.data_dir(),
 		&server_config.tor,
-	);
+	)
+	.unwrap();
 
 	IntegrationMixServer {
 		server_key: server_key.clone(),

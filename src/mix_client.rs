@@ -22,14 +22,13 @@ use grin_core::ser::ProtocolVersion;
 use grin_onion::crypto::dalek::{self, MwixnetServerIdentityKey};
 use grin_onion::onion::Onion;
 use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::{start_onion_service, TorHttpClient};
+use grin_p2p::tor::TorHttpClient;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
 use async_trait::async_trait;
 use serde_json;
 use serde_json::json;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use thiserror::Error;
 
 /// Error types for interacting with nodes
@@ -68,19 +67,9 @@ impl TorHttpClient<TorMwixnetConfig> for MixClientImpl {
 }
 
 impl MixClientImpl {
-	pub fn new(
-		config: ServerConfig,
-		next_pubkey: MwixnetServerIdentityKey,
-	) -> Result<Self, MixClientError> {
+	pub fn new(config: ServerConfig, next_pubkey: MwixnetServerIdentityKey) -> Self {
 		let addr = OnionV3Address::from_bytes(next_pubkey.as_ref().to_bytes());
-		start_onion_service(
-			config.key.clone(),
-			config.addr.to_string().as_str(),
-			PathBuf::from(&config.tor.data_file_dir),
-			&config.tor,
-		)
-		.map_err(MixClientError::Tor)?;
-		Ok(MixClientImpl { config, addr })
+		MixClientImpl { config, addr }
 	}
 
 	fn send_json_request<D: serde::de::DeserializeOwned>(
