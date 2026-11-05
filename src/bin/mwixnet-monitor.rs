@@ -13,20 +13,45 @@
 // limitations under the License.
 
 use clap::{load_yaml, App, Error, ErrorKind};
+use futures::future::join_all;
 use hyper::Uri;
 use serde_derive::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use grin_p2p::tor::arti::tor_post;
 use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::start_tor;
+use grin_p2p::tor::{start_tor, TorHttpClient};
 use grin_wallet_config::config::GRIN_HOME;
+use grin_wallet_libwallet::mwixnet::{MwixnetClient, MwixnetResponse};
 use mwixnet::config::{ConfigError, TorMwixnetConfig};
 
-fn target(value: &str) -> Result<(String, String), String> {
+struct MwixnetClientImpl {
+	tor_config: TorMwixnetConfig,
+	server_url: OnionV3Address,
+}
+
+impl TorHttpClient<TorMwixnetConfig> for MwixnetClientImpl {
+	fn tor_config(&self) -> &TorMwixnetConfig {
+		&self.tor_config
+	}
+}
+
+impl MwixnetClient<TorMwixnetConfig> for MwixnetClientImpl {
+	fn server_url(&self) -> &OnionV3Address {
+		&self.server_url
+	}
+}
+impl MwixnetClientImpl {
+	/// Create new client instance.
+	pub fn new(tor_config: TorMwixnetConfig, server_url: OnionV3Address) -> Self {
+		MwixnetClientImpl {
+			tor_config,
+			server_url,
+		}
+	}
+}
+
+fn target(value: &str) -> Result<(String, OnionV3Address), String> {
 	let (name, address) = value.split_once('=').ok_or("Expected NAME=ADDRESS.onion")?;
 	if name.is_empty()
 		|| !name
@@ -39,14 +64,8 @@ fn target(value: &str) -> Result<(String, String), String> {
 		.parse()
 		.map_err(|e| format!("Bad url format: {}", e))?;
 	let host = url.host().ok_or(format!("Bad url host for {}", address))?;
-	OnionV3Address::try_from(host).map_err(|e| e.to_string())?;
-	Ok((name.into(), format!("http://{host}/v1")))
-}
-
-fn healthy(body: &str) -> bool {
-	serde_json::from_str::<Value>(body).is_ok_and(|v| {
-		v["jsonrpc"] == "2.0" && v["id"] == 1 && v["result"] == "ok" && v.get("error").is_none()
-	})
+	let addr = OnionV3Address::try_from(host).map_err(|e| e.to_string())?;
+	Ok((name.into(), addr))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,28 +107,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 			loop {
 				interval.tick().await;
-				let results = targets
-					.iter()
-					.map(|(name, url)| {
+				let results = join_all(targets.iter().map(|(name, url)| {
+					let config = config.clone();
+					async move {
 						let start = Instant::now();
-						let body = json!({"jsonrpc":"2.0", "id":1, "method":"health", "params":[]})
-							.to_string();
 
-						let mut headers = HashMap::new();
-						headers.insert("accept", "application/json");
-						headers.insert("content-type", "application/json");
+						let client = MwixnetClientImpl::new(config, url.clone());
+						let result = client.health().await;
 
-						let result = tor_post(&config, body, Some(headers), url);
 						let elapsed = start.elapsed().as_secs_f64();
 						match result {
-							Ok(body) if healthy(&body) => {
-								println!("{name} ok {elapsed:.2}s");
-								true
-							}
-							Ok(_) => {
-								println!("{name} failed {elapsed:.2}s invalid health response");
-								false
-							}
+							Ok(res) => res == MwixnetResponse::Accepted,
 							Err(error) => {
 								println!(
 									"{name} failed {elapsed:.2}s {}",
@@ -118,8 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 								false
 							}
 						}
-					})
-					.collect::<Vec<_>>();
+					}
+				}))
+				.await;
 				if args.is_present("once") {
 					return if results.into_iter().all(|ok| ok) {
 						Ok::<(), Box<dyn std::error::Error>>(())
@@ -153,7 +162,7 @@ mod tests {
 		let onion = "mza3u6vkqodqc6kjjapfbcjrg7hgpkuw6nyq5xvfjqp5jm2lfeaocwqd.onion";
 		assert_eq!(
 			target(&format!("swap={onion}")).unwrap(),
-			("swap".into(), format!("http://{onion}/v1"))
+			("swap".into(), OnionV3Address::try_from(onion).unwrap())
 		);
 		for value in [
 			"swap",
@@ -163,20 +172,6 @@ mod tests {
 			&format!("swap\n={onion}"),
 		] {
 			assert!(target(value).is_err());
-		}
-	}
-
-	#[test]
-	fn responses() {
-		assert!(healthy(r#"{"jsonrpc":"2.0","id":1,"result":"ok"}"#));
-		for body in [
-			"not json",
-			r#"{"result":"ok"}"#,
-			r#"{"jsonrpc":"2.0","id":2,"result":"ok"}"#,
-			r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601}}"#,
-			r#"{"jsonrpc":"2.0","id":1,"result":"ok","error":null}"#,
-		] {
-			assert!(!healthy(body));
 		}
 	}
 }

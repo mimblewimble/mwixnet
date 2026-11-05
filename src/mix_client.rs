@@ -86,7 +86,7 @@ impl MixClientImpl {
 		let request_str = serde_json::to_string(&build_request(method, params)).unwrap();
 
 		let res = self
-			.post(&url, Some(headers), request_str)
+			.post_tor(&url, Some(headers), request_str)
 			.await
 			.map_err(MixClientError::Tor)?;
 		let response: Response =

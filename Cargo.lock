@@ -2796,6 +2796,7 @@ name = "grin_wallet_libwallet"
 version = "5.5.1"
 dependencies = [
  "age",
+ "async-trait",
  "base64 0.9.3",
  "bech32 0.7.3",
  "blake2-rfc",
@@ -2805,6 +2806,7 @@ dependencies = [
  "chrono",
  "curve25519-dalek 5.0.0",
  "ed25519-dalek",
+ "grin_api",
  "grin_core",
  "grin_keychain",
  "grin_p2p",
