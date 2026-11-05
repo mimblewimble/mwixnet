@@ -1,4 +1,4 @@
 [submodule "grin-wallet"]
 	path = grin-wallet
-	url = https://github.com/mimblewimble/grin-wallet
-	branch = staging
+	url = https://github.com/ardocrat/grin-wallet
+	branch = tor_grin_module

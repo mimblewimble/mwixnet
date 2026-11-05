@@ -7,22 +7,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::{sleep, spawn};
 use std::time::Duration;
-use tor_rtcompat::PreferredRuntime;
 
 use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_onion::crypto;
 use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
+use grin_p2p::tor::ov3::OnionV3Address;
+use grin_p2p::tor::{start_onion_service, stop_onion_service};
 use grin_util::{StopState, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
-use grin_wallet_util::OnionV3Address;
-use mwixnet::config::{self, ServerConfig};
-use mwixnet::mix_client::{MixClient, MixClientImpl};
+use mwixnet::config::{self, ServerConfig, TorMwixnetConfig};
+use mwixnet::mix_client::{MixClient, MixClientError, MixClientImpl};
 use mwixnet::node::GrinNode;
 use mwixnet::node::HttpGrinNode;
 use mwixnet::servers;
 use mwixnet::store::SwapStore;
-use mwixnet::tor;
 use mwixnet::wallet::{HttpWallet, Wallet};
 
 const DEFAULT_INTERVAL: u32 = 12 * 60 * 60;
@@ -34,7 +33,8 @@ impl log::Log for StderrLogger {
 		metadata.level() <= log::max_level()
 			&& (metadata.target().starts_with("mwixnet")
 				|| metadata.target().starts_with("arti_client")
-				|| metadata.target().starts_with("tor_"))
+				|| metadata.target().starts_with("tor_")
+				|| metadata.target().starts_with("grin_"))
 	}
 
 	fn log(&self, record: &log::Record<'_>) {
@@ -128,6 +128,17 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 			);
 		}
 
+		let data_dir = match data_dir {
+			Some(p) => p.to_owned().replace("\\", "/"),
+			None => config::mwixnet_data_path(&chain_type)
+				.to_str()
+				.unwrap()
+				.to_owned(),
+		};
+		let tor_config = TorMwixnetConfig {
+			data_file_dir: data_dir.clone(),
+			..Default::default()
+		};
 		let server_config = ServerConfig {
 			key: crypto::secp::random_secret(false),
 			interval_s: round_time.unwrap_or(DEFAULT_INTERVAL),
@@ -153,16 +164,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 					.map(|p| p.to_owned()),
 			},
 			collect_fees: !no_fee_collection,
-			min_circuit_timeout_ms: config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
-			data_dir: match data_dir {
-				Some(p) => p.to_owned().replace("\\", "/"),
-				None => config::mwixnet_data_path(&chain_type)
-					.to_str()
-					.unwrap()
-					.to_owned(),
-			},
+			data_dir,
 			prev_server,
 			next_server,
+			tor: tor_config,
 		};
 
 		let password = server_password(server_pass_file, true)?;
@@ -236,6 +241,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	// Override data_dir, if supplied
 	if let Some(path) = data_dir {
 		server_config.data_dir = path.to_owned().replace("\\", "/");
+		server_config.tor.data_file_dir = server_config.data_dir.to_owned();
 	}
 
 	// Override grin_node_foreign_api_secret_path, if supplied
@@ -306,33 +312,28 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 		None
 	};
 
-	let tor_runtime = rt_handle.block_on(async { PreferredRuntime::current() })?;
-	tor_log_ratelim::install_runtime(tor_runtime.clone())?;
-
-	let tor_instance =
-		rt_handle.block_on(tor::async_init_tor(tor_runtime.clone(), &server_config))?;
-	let tor_instance = Arc::new(grin_util::Mutex::new(tor_instance));
-	let tor_clone = tor_instance.clone();
+	// Start Tor service.
+	start_onion_service(
+		server_config.key.clone(),
+		server_config.addr.to_string().as_str(),
+		PathBuf::from(&server_config.tor.data_file_dir),
+		&server_config.tor,
+	)
+	.map_err(MixClientError::Tor)?;
 
 	let stop_state = Arc::new(StopState::new());
 	let stop_state_clone = stop_state.clone();
 
+	let onion_address = server_config.onion_address().to_string();
 	rt_handle.spawn(async move {
 		build_signals_fut().await;
-		match tokio::task::spawn_blocking(move || tor_clone.lock().stop()).await {
-			Ok(Ok(())) => {}
-			Ok(Err(error)) => eprintln!("Could not stop Tor service cleanly: {error}"),
-			Err(error) => eprintln!("Tor shutdown task failed: {error}"),
-		}
+		stop_onion_service(onion_address).unwrap_or_default();
 		stop_state_clone.stop();
 	});
 
 	let next_mixer: Option<Arc<dyn MixClient>> = server_config.next_server.clone().map(|pk| {
-		let client: Arc<dyn MixClient> = Arc::new(MixClientImpl::new(
-			server_config.clone(),
-			tor_instance.clone(),
-			pk.clone(),
-		));
+		let client: Arc<dyn MixClient> =
+			Arc::new(MixClientImpl::new(server_config.clone(), pk.clone()));
 		client
 	});
 

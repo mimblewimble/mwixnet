@@ -9,6 +9,11 @@ args:
       value_name: DIR
       takes_value: true
       required: false
+  - config_file:
+      help: Path to load/save the mwixnet-config.toml configuration file
+      short: c
+      long: config_file
+      takes_value: true
   - once:
       help: Check once and exit with an error if any target fails
       long: once

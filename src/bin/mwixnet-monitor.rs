@@ -12,19 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arti_client::{config::TorClientConfigBuilder, TorClient};
 use clap::{load_yaml, App, Error, ErrorKind};
 use futures::future::join_all;
-use mwixnet::tor::async_post;
-use serde_json::{json, Value};
+use hyper::Uri;
+use serde_derive::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tor_hsservice::HsId;
-use tor_rtcompat::PreferredRuntime;
 
+use grin_p2p::tor::ov3::OnionV3Address;
+use grin_p2p::tor::{start_tor, TorHttpClient};
 use grin_wallet_config::config::GRIN_HOME;
+use grin_wallet_libwallet::mwixnet::{MwixnetClient, MwixnetResponse};
+use mwixnet::config::{ConfigError, TorMwixnetConfig};
 
-fn target(value: &str) -> Result<(String, String), String> {
+struct MwixnetClientImpl {
+	tor_config: TorMwixnetConfig,
+	server_url: OnionV3Address,
+}
+
+impl TorHttpClient<TorMwixnetConfig> for MwixnetClientImpl {
+	fn tor_config(&self) -> &TorMwixnetConfig {
+		&self.tor_config
+	}
+}
+
+impl MwixnetClient<TorMwixnetConfig> for MwixnetClientImpl {
+	fn server_url(&self) -> &OnionV3Address {
+		&self.server_url
+	}
+}
+impl MwixnetClientImpl {
+	/// Create new client instance.
+	pub fn new(tor_config: TorMwixnetConfig, server_url: OnionV3Address) -> Self {
+		MwixnetClientImpl {
+			tor_config,
+			server_url,
+		}
+	}
+}
+
+fn target(value: &str) -> Result<(String, OnionV3Address), String> {
 	let (name, address) = value.split_once('=').ok_or("Expected NAME=ADDRESS.onion")?;
 	if name.is_empty()
 		|| !name
@@ -33,18 +60,15 @@ fn target(value: &str) -> Result<(String, String), String> {
 	{
 		return Err("Use letters, numbers, '-' or '_' for the name".into());
 	}
-	address.parse::<HsId>().map_err(|e| e.to_string())?;
-	Ok((name.into(), format!("http://{address}/v1")))
+	let url: Uri = address
+		.parse()
+		.map_err(|e| format!("Bad url format: {}", e))?;
+	let host = url.host().ok_or(format!("Bad url host for {}", address))?;
+	let addr = OnionV3Address::try_from(host).map_err(|e| e.to_string())?;
+	Ok((name.into(), addr))
 }
 
-fn healthy(body: &str) -> bool {
-	serde_json::from_str::<Value>(body).is_ok_and(|v| {
-		v["jsonrpc"] == "2.0" && v["id"] == 1 && v["result"] == "ok" && v.get("error").is_none()
-	})
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let yml = load_yaml!("mwixnet-monitor.yml");
 	let args = App::from_yaml(yml).get_matches();
 	let targets: Vec<_> = args
@@ -53,6 +77,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 		.map(|value| target(value).map_err(|error| format!("Invalid target '{value}': {error}")))
 		.collect::<Result<_, _>>()
 		.unwrap_or_else(|error| Error::with_description(&error, ErrorKind::ValueValidation).exit());
+
+	let mut config = match args.value_of("config_file") {
+		Some(path) => read_tor_config(PathBuf::from(path))?,
+		None => TorMwixnetConfig::default(),
+	};
+
+	// Set Tor data path.
 	let data_dir = match args.value_of("data_dir") {
 		Some(value) => PathBuf::from(value),
 		None => {
@@ -62,55 +93,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 			grin_path
 		}
 	};
-	let mut config =
-		TorClientConfigBuilder::from_directories(data_dir.join("state"), data_dir.join("cache"));
-	config.address_filter().allow_onion_addrs(true);
-	eprintln!("Bootstrapping Tor");
-	let client = TorClient::with_runtime(PreferredRuntime::current()?)
-		.config(config.build()?)
-		.create_bootstrapped()
-		.await?;
-	eprintln!("Tor ready");
-	let mut interval = tokio::time::interval(Duration::from_secs(120));
-	interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-	loop {
-		interval.tick().await;
-		let results = join_all(targets.iter().map(|(name, url)| {
-			let client = client.clone();
-			async move {
-				let start = Instant::now();
-				let body =
-					json!({"jsonrpc":"2.0", "id":1, "method":"health", "params":[]}).to_string();
-				let result = async_post(client, url, body).await;
-				let elapsed = start.elapsed().as_secs_f64();
-				match result {
-					Ok(body) if healthy(&body) => {
-						println!("{name} ok {elapsed:.2}s");
-						true
+	config.data_file_dir = data_dir.to_str().unwrap().into();
+
+	eprintln!("Starting Tor");
+	start_tor(&config)?;
+	eprintln!("Tor started successfully");
+
+	tokio::runtime::Builder::new_multi_thread()
+		.enable_all()
+		.build()?
+		.block_on(async {
+			let mut interval = tokio::time::interval(Duration::from_secs(120));
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				interval.tick().await;
+				let results = join_all(targets.iter().map(|(name, url)| {
+					let config = config.clone();
+					async move {
+						let start = Instant::now();
+
+						let client = MwixnetClientImpl::new(config, url.clone());
+						let result = client.health().await;
+
+						let elapsed = start.elapsed().as_secs_f64();
+						match result {
+							Ok(res) => res == MwixnetResponse::Accepted,
+							Err(error) => {
+								println!(
+									"{name} failed {elapsed:.2}s {}",
+									error.to_string().replace(['\n', '\r'], " ")
+								);
+								false
+							}
+						}
 					}
-					Ok(_) => {
-						println!("{name} failed {elapsed:.2}s invalid health response");
-						false
-					}
-					Err(error) => {
-						println!(
-							"{name} failed {elapsed:.2}s {}",
-							error.to_string().replace(['\n', '\r'], " ")
-						);
-						false
-					}
+				}))
+				.await;
+				if args.is_present("once") {
+					return if results.into_iter().all(|ok| ok) {
+						Ok::<(), Box<dyn std::error::Error>>(())
+					} else {
+						Err("Health check failed".into())
+					};
 				}
 			}
-		}))
-		.await;
-		if args.is_present("once") {
-			return if results.into_iter().all(|ok| ok) {
-				Ok(())
-			} else {
-				Err("Health check failed".into())
-			};
-		}
-	}
+		})?;
+	Ok(())
+}
+
+/// The config attributes saved to disk
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct RawConfig {
+	tor: Option<TorMwixnetConfig>,
+}
+
+fn read_tor_config(config_path: PathBuf) -> Result<TorMwixnetConfig, ConfigError> {
+	let contents = std::fs::read_to_string(config_path).map_err(ConfigError::ReadConfigError)?;
+	let raw_config: RawConfig = toml::from_str(&contents).map_err(ConfigError::DecodingError)?;
+	Ok(raw_config.tor.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -122,7 +162,7 @@ mod tests {
 		let onion = "mza3u6vkqodqc6kjjapfbcjrg7hgpkuw6nyq5xvfjqp5jm2lfeaocwqd.onion";
 		assert_eq!(
 			target(&format!("swap={onion}")).unwrap(),
-			("swap".into(), format!("http://{onion}/v1"))
+			("swap".into(), OnionV3Address::try_from(onion).unwrap())
 		);
 		for value in [
 			"swap",
@@ -132,20 +172,6 @@ mod tests {
 			&format!("swap\n={onion}"),
 		] {
 			assert!(target(value).is_err());
-		}
-	}
-
-	#[test]
-	fn responses() {
-		assert!(healthy(r#"{"jsonrpc":"2.0","id":1,"result":"ok"}"#));
-		for body in [
-			"not json",
-			r#"{"result":"ok"}"#,
-			r#"{"jsonrpc":"2.0","id":2,"result":"ok"}"#,
-			r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601}}"#,
-			r#"{"jsonrpc":"2.0","id":1,"result":"ok","error":null}"#,
-		] {
-			assert!(!healthy(body));
 		}
 	}
 }
