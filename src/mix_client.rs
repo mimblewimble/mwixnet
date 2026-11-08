@@ -23,6 +23,7 @@ use grin_onion::crypto::dalek::{self, MwixnetServerIdentityKey};
 use grin_onion::onion::Onion;
 use grin_p2p::tor::ov3::OnionV3Address;
 use grin_p2p::tor::TorHttpClient;
+use grin_wallet_config::TorWalletConfig;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
 use async_trait::async_trait;
@@ -86,11 +87,16 @@ impl MixClientImpl {
 		let request_str = serde_json::to_string(&build_request(method, params)).unwrap();
 
 		let res = self
-			.post_tor(&url, Some(headers), request_str)
+			.post_tor(
+				&url,
+				Some(headers),
+				request_str,
+				TorWalletConfig::RESPONSE_LIMIT,
+			)
 			.await
 			.map_err(MixClientError::Tor)?;
 		let response: Response =
-			serde_json::from_str(&res).map_err(MixClientError::DecodeResponseError)?;
+			serde_json::from_str(res.body()).map_err(MixClientError::DecodeResponseError)?;
 
 		if let Some(ref e) = response.error {
 			return Err(MixClientError::ResponseError(e.clone()));

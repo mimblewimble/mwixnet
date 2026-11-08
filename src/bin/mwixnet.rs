@@ -316,7 +316,6 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	start_onion_service(
 		server_config.key.clone(),
 		server_config.addr.to_string().as_str(),
-		PathBuf::from(&server_config.tor.data_file_dir),
 		&server_config.tor,
 	)
 	.map_err(MixClientError::Tor)?;

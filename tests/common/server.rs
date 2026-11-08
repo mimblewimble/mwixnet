@@ -15,55 +15,43 @@
 use crate::common::node::IntegrationGrinNode;
 use crate::common::wallet::{GrinWalletManager, IntegrationGrinWallet};
 
-use serde_json::json;
 use std::iter;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use grin_api::{client, json_rpc};
 use grin_core::core::Transaction;
-use grin_p2p::tor::config::TorConfig;
 use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::start_onion_service;
-use grin_p2p::tor::stop_onion_service;
+use grin_p2p::tor::{onion_service_status, start_onion_service, stop_onion_service, ServiceStatus};
 use grin_util::secp::SecretKey;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
-use grin_wallet_libwallet::mwixnet::{MwixnetServerPublicKey, SwapReq};
+use grin_wallet_libwallet::mwixnet::{
+	MwixnetClient, MwixnetClientImpl, MwixnetResponse, MwixnetServerPublicKey, SwapReq,
+};
 use mwixnet::config::TorMwixnetConfig;
 use mwixnet::mix_client::MixClientImpl;
 use mwixnet::{SwapError, SwapServer, SwapStore};
 
 pub struct IntegrationSwapServer {
 	onion_pubkey: MwixnetServerPublicKey,
-	onion_address: OnionV3Address,
+	client: MwixnetClientImpl<TorMwixnetConfig>,
 	swap_server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
-	rpc_server: mwixnet::servers::rpc::RpcServer,
+	_rpc_server: mwixnet::servers::rpc::RpcServer,
 	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
 }
 
 impl IntegrationSwapServer {
 	pub async fn async_swap(&self, request: &SwapReq) -> Result<(), SwapError> {
-		let url = format!("http://{}/v1", self.rpc_server.address());
-		let params = json!([request]);
-		let request = json_rpc::build_request("swap", &params);
-		let response: json_rpc::Response = client::post_async(&url, &request, None)
+		match self
+			.client
+			.swap(request)
 			.await
-			.map_err(|e| SwapError::ClientError(e.to_string()))?;
-		if let Some(error) = response.error {
-			return Err(SwapError::ClientError(error.message));
-		}
-		let response: String =
-			serde_json::from_value(response.result.unwrap_or(serde_json::Value::Null))
-				.map_err(|e| SwapError::ClientError(e.to_string()))?;
-		if response == "success" {
-			Ok(())
-		} else {
-			Err(SwapError::ClientError(format!(
-				"Unexpected swap API response: {}",
-				response
-			)))
+			.map_err(|error| SwapError::ClientError(error.to_string()))?
+		{
+			MwixnetResponse::Accepted => Ok(()),
+			MwixnetResponse::Rejected(message) => Err(SwapError::ClientError(message)),
 		}
 	}
 
@@ -84,6 +72,24 @@ pub struct IntegrationMixServer {
 	onion_pubkey: MwixnetServerPublicKey,
 	_rpc_server: mwixnet::servers::rpc::RpcServer,
 	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
+}
+
+async fn start_tor_listener(config: &mwixnet::ServerConfig, addr: &SocketAddr) {
+	tokio::task::block_in_place(|| {
+		start_onion_service(config.key.clone(), &addr.to_string(), &config.tor)
+	})
+	.unwrap();
+	let address = config.onion_address().to_string();
+	tokio::time::timeout(Duration::from_secs(120), async {
+		while !matches!(
+			onion_service_status(address.clone()),
+			ServiceStatus::Running | ServiceStatus::Bootstrapped
+		) {
+			tokio::time::sleep(Duration::from_millis(500)).await;
+		}
+	})
+	.await
+	.expect("Tor listener did not become ready");
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -139,19 +145,13 @@ async fn async_new_swap_server(
 	)
 	.unwrap();
 
-	start_onion_service(
-		server_config.key.clone(),
-		rpc_server.address().to_string().as_str(),
-		server_config.tor.data_dir(),
-		&server_config.tor,
-	)
-	.unwrap();
+	start_tor_listener(&server_config, rpc_server.address()).await;
 
 	IntegrationSwapServer {
 		onion_pubkey: server_config.onion_pubkey(),
-		onion_address: server_config.onion_address(),
+		client: MwixnetClientImpl::new(server_config.tor.clone(), server_config.onion_address()),
 		swap_server,
-		rpc_server,
+		_rpc_server: rpc_server,
 		_wallet: wallet,
 	}
 }
@@ -208,13 +208,7 @@ async fn async_new_mix_server(
 	)
 	.unwrap();
 
-	start_onion_service(
-		server_config.key.clone(),
-		rpc_server.address().to_string().as_str(),
-		server_config.tor.data_dir(),
-		&server_config.tor,
-	)
-	.unwrap();
+	start_tor_listener(&server_config, rpc_server.address()).await;
 
 	IntegrationMixServer {
 		server_key: server_key.clone(),
@@ -297,7 +291,7 @@ impl Servers {
 	}
 
 	pub fn stop_all(&mut self) {
-		let swapper_address: OnionV3Address = self.swapper.onion_address.clone();
+		let swapper_address: OnionV3Address = self.swapper.client.server_url().clone();
 		stop_onion_service(swapper_address.to_string()).expect("stop swap Tor service");
 
 		self.mixers.iter_mut().for_each(|mixer| {

@@ -39,8 +39,6 @@ const GRIN_HOME: &str = ".grin";
 const MWIXNET_DATA_DIR: &str = "mwixnet_data";
 const NODE_FOREIGN_API_SECRET_FILE_NAME: &str = ".foreign_api_secret";
 const WALLET_OWNER_API_SECRET_FILE_NAME: &str = ".owner_api_secret";
-/// Default minimum Tor circuit build timeout in milliseconds.
-pub const DEFAULT_MIN_CIRCUIT_TIMEOUT_MS: i32 = 60_000;
 const CONFIG_HEADER: &str = "\
 # MWixnet server configuration
 # Wallet clients use the ordered X25519 onion keys printed at server startup.
@@ -305,8 +303,8 @@ pub struct TorMwixnetConfig {
 	/// Minimum Tor circuit build timeout in milliseconds.
 	pub min_circuit_timeout_ms: Option<i32>,
 	/// Tor bridge config.
-	#[serde(default)]
-	pub bridge: TorBridgeConfig,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub bridges: Vec<TorBridgeConfig>,
 	/// Tor proxy config.
 	#[serde(default)]
 	pub proxy: TorProxyConfig,
@@ -329,8 +327,8 @@ impl TorConfig for TorMwixnetConfig {
 		self.min_circuit_timeout_ms
 	}
 
-	fn bridge_config(&self) -> &TorBridgeConfig {
-		&self.bridge
+	fn bridge_config(&self) -> &[TorBridgeConfig] {
+		&self.bridges
 	}
 
 	fn proxy_config(&self) -> &TorProxyConfig {
@@ -357,7 +355,7 @@ impl Default for TorMwixnetConfig {
 			request_timeout_secs: Some(REQUEST_TIMEOUT_SECS),
 			bootstrap_timeout_secs: Some(BOOTSTRAP_TIMEOUT_SECS),
 			min_circuit_timeout_ms: Some(MIN_CIRCUIT_TIMEOUT_MS),
-			bridge: TorBridgeConfig::default(),
+			bridges: Vec::new(),
 			proxy: TorProxyConfig::default(),
 		}
 	}
@@ -414,7 +412,7 @@ fn config_comment(key: &str) -> Option<&'static str> {
 		"request_timeout_secs" => Some("Total timeout for request in seconds."),
 		"bootstrap_timeout_secs" => Some("Timeout for bootstrap in seconds."),
 		"min_circuit_timeout_ms" => Some("Minimum Tor circuit build timeout in milliseconds."),
-		"[tor.bridge]" => Some("
+		"[[tor.bridges]]" => Some("
 
 #########################################
 ### TOR BRIDGE                        ###
@@ -426,14 +424,15 @@ fn config_comment(key: &str) -> Option<&'static str> {
 #Enable it by entering a single bridge line. To disable it, you must comment it.
 #Support of the transport: webtunnel, obfs4, and snowflake.
 #webtunnel, obfs4proxy or snowflake client binary must be installed and on your path.
+#[[tor.bridges]]
 #Custom path for client binary
 #bridge_bin_path = \"\"
 
 #For example, the bridge line must be in the following format for obfs4 transport: \"obfs4 [IP:PORT] [FINGERPRINT] cert=[CERT] iat-mode=[IAT-MODE]\"
 #bridge_line = \"\"
 
-#Plugging client option, needed only for snowflake (let it empty if you want to use the default option of tor) or debugging purpose
-#client_option = \"\"
+#Transport client arguments
+#client_args = []
 
 #########################################
 ### TOR PROXY                         ###
@@ -491,10 +490,10 @@ fn documented_config(raw_config: &RawConfig) -> Result<String, ConfigError> {
 #address = \"\"
 
 #Username for the proxy server authentification
-#user = \"\"
+#username = \"\"
 
 #Password for the proxy server authentification
-#pass = \"\"
+#password = \"\"
 
 #This computer goes through a firewall that only allows connections to certain ports (Optional)
 #allowed_port = [80, 443]",
@@ -767,7 +766,7 @@ mod tests {
 		));
 		assert!(contents.contains(&format!(
 			"# Minimum Tor circuit build timeout in milliseconds.\nmin_circuit_timeout_ms = {}",
-			DEFAULT_MIN_CIRCUIT_TIMEOUT_MS
+			MIN_CIRCUIT_TIMEOUT_MS
 		)));
 		assert!(contents.contains(
 			"# Previous server Ed25519 identity key; setting it makes this server a mixer.\n# prev_server ="

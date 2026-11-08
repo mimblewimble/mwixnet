@@ -20,36 +20,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::{start_tor, TorHttpClient};
+use grin_p2p::tor::start_tor;
 use grin_wallet_config::config::GRIN_HOME;
-use grin_wallet_libwallet::mwixnet::{MwixnetClient, MwixnetResponse};
+use grin_wallet_libwallet::mwixnet::{MwixnetClient, MwixnetClientImpl, MwixnetResponse};
 use mwixnet::config::{ConfigError, TorMwixnetConfig};
-
-struct MwixnetClientImpl {
-	tor_config: TorMwixnetConfig,
-	server_url: OnionV3Address,
-}
-
-impl TorHttpClient<TorMwixnetConfig> for MwixnetClientImpl {
-	fn tor_config(&self) -> &TorMwixnetConfig {
-		&self.tor_config
-	}
-}
-
-impl MwixnetClient<TorMwixnetConfig> for MwixnetClientImpl {
-	fn server_url(&self) -> &OnionV3Address {
-		&self.server_url
-	}
-}
-impl MwixnetClientImpl {
-	/// Create new client instance.
-	pub fn new(tor_config: TorMwixnetConfig, server_url: OnionV3Address) -> Self {
-		MwixnetClientImpl {
-			tor_config,
-			server_url,
-		}
-	}
-}
 
 fn target(value: &str) -> Result<(String, OnionV3Address), String> {
 	let (name, address) = value.split_once('=').ok_or("Expected NAME=ADDRESS.onion")?;
