@@ -1,32 +1,45 @@
+// Copyright 2026 The Grin Developers
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+mod common;
+
 #[macro_use]
 extern crate log;
-
-use std::ops::Deref;
-
-use function_name::named;
-use grin_chain::{Chain, Options};
-use grin_core::core::hash::Hashed;
-use grin_core::global;
-use grin_util::logger::LoggingConfig;
-use log::Level;
 
 use crate::common::miner::Miner;
 use crate::common::node::GrinNodeManager;
 use crate::common::server::Servers;
 use crate::common::wallet::GrinWalletManager;
 
-mod common;
+use grin_chain::{Chain, Options};
+use grin_core::core::hash::Hashed;
+use grin_core::global;
+use grin_p2p::tor::start_tor;
+use grin_util::logger::LoggingConfig;
+use mwixnet::config::TorMwixnetConfig;
 
-/// Just removes all results from previous runs
-fn clean_all_output(test_dir: &str) {
-	if let Err(e) = remove_dir_all::remove_dir_all(test_dir) {
-		println!("can't remove output from previous test :{}, may be ok", e);
-	}
-}
+use function_name::named;
+use log::Level;
+use std::ops::Deref;
 
-fn setup_test(test_name: &str) -> (GrinNodeManager, GrinWalletManager, String) {
-	let test_dir = format!("./target/tmp/.{}", test_name);
-	clean_all_output(test_dir.as_str());
+fn setup_test(test_name: &str) -> (GrinNodeManager, GrinWalletManager, tempfile::TempDir) {
+	// Avoid checkout permissions affecting Tor
+	let test_dir = tempfile::Builder::new()
+		.prefix(test_name)
+		.tempdir()
+		.unwrap();
+	let test_path = test_dir.path().to_str().unwrap();
 
 	let logger = LoggingConfig {
 		log_to_file: false,
@@ -38,8 +51,8 @@ fn setup_test(test_name: &str) -> (GrinNodeManager, GrinWalletManager, String) {
 	global::set_local_accept_fee_base(50_000_000);
 	global::init_global_chain_type(global::ChainTypes::AutomatedTesting);
 
-	let nodes = GrinNodeManager::new(test_dir.as_str());
-	let wallets = GrinWalletManager::new(test_dir.as_str());
+	let nodes = GrinNodeManager::new(test_path);
+	let wallets = GrinWalletManager::new(test_path);
 
 	(nodes, wallets, test_dir)
 }
@@ -66,10 +79,17 @@ fn integration_test() -> Result<(), Box<dyn std::error::Error>> {
 	let node1_url = node1.lock().api_address();
 	let node1_server = node1.lock().start();
 
+	// Start Tor
+	let tor_config = TorMwixnetConfig {
+		data_file_dir: test_dir.path().display().to_string(),
+		..Default::default()
+	};
+	start_tor(&tor_config)?;
+
 	// Setup swap & mix servers and their wallets
 	let rt_handle = rt.handle().clone();
 	let mut servers = rt.block_on(Servers::async_setup(
-		test_dir.as_str(),
+		test_dir.path().to_str().unwrap(),
 		&rt_handle,
 		&mut wallets,
 		&node1,

@@ -1,28 +1,44 @@
-use core::num::NonZeroU32;
+// Copyright 2026 The Grin Developers
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use grin_core::global;
 use grin_core::global::ChainTypes;
+use grin_onion::crypto::secp::SecretKey;
+use grin_p2p::tor::config::{
+	TorBridgeConfig, TorConfig, TorProxyConfig, BOOTSTRAP_TIMEOUT_SECS, MIN_CIRCUIT_TIMEOUT_MS,
+	REQUEST_TIMEOUT_SECS,
+};
+use grin_p2p::tor::ov3::OnionV3Address;
 use grin_util::{file, ToHex, ZeroingString};
-use grin_wallet_util::OnionV3Address;
+use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
+use grin_wallet_libwallet::mwixnet::{onion as grin_onion, MwixnetServerPublicKey};
+
+use core::num::NonZeroU32;
 use rand::{thread_rng, Rng};
 use ring::{aead, pbkdf2};
 use serde_derive::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::prelude::*;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::result::Result;
 use thiserror::Error;
-
-use grin_onion::crypto::secp::SecretKey;
-use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
-use grin_wallet_libwallet::mwixnet::{onion as grin_onion, MwixnetServerPublicKey};
 
 const GRIN_HOME: &str = ".grin";
 const MWIXNET_DATA_DIR: &str = "mwixnet_data";
 const NODE_FOREIGN_API_SECRET_FILE_NAME: &str = ".foreign_api_secret";
 const WALLET_OWNER_API_SECRET_FILE_NAME: &str = ".owner_api_secret";
-/// Default minimum Tor circuit build timeout in milliseconds.
-pub const DEFAULT_MIN_CIRCUIT_TIMEOUT_MS: i32 = 60_000;
 const CONFIG_HEADER: &str = "\
 # MWixnet server configuration
 # Wallet clients use the ordered X25519 onion keys printed at server startup.
@@ -47,8 +63,6 @@ pub struct ServerConfig {
 	pub wallet_owner_secret_path: Option<String>,
 	/// whether to collect excess hop fees in the server wallet
 	pub collect_fees: bool,
-	/// minimum Tor circuit build timeout in milliseconds
-	pub min_circuit_timeout_ms: i32,
 	/// The directory in which mwixnet data files are stored
 	pub data_dir: String,
 	/// Ed25519 identity key of the previous mix/swap server (e.g. N_1 if this is N_2)
@@ -57,6 +71,8 @@ pub struct ServerConfig {
 	/// Ed25519 identity key of the next mix server
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	pub next_server: Option<MwixnetServerIdentityKey>,
+	/// Tor configuration.
+	pub tor: TorMwixnetConfig,
 }
 
 /// Public protocol settings for clients.
@@ -94,7 +110,7 @@ pub struct PublicPeer {
 
 impl ServerConfig {
 	fn network() -> &'static str {
-		match grin_core::global::get_chain_type() {
+		match global::get_chain_type() {
 			ChainTypes::Mainnet => "mainnet",
 			ChainTypes::Testnet => "testnet",
 			ChainTypes::UserTesting => "user_testing",
@@ -271,6 +287,80 @@ impl EncryptedServerKey {
 	}
 }
 
+/// Tor configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TorMwixnetConfig {
+	/// Whether to use integrated Tor library.
+	pub use_integrated: bool,
+	/// The address of the socks proxy for external process.
+	pub socks_proxy_addr: String,
+	/// Tor data directory.
+	pub data_file_dir: String,
+	/// Total timeout for request in seconds.
+	pub request_timeout_secs: Option<u64>,
+	/// Timeout for bootstrap in seconds.
+	pub bootstrap_timeout_secs: Option<u64>,
+	/// Minimum Tor circuit build timeout in milliseconds.
+	pub min_circuit_timeout_ms: Option<i32>,
+	/// Tor bridge config.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub bridges: Vec<TorBridgeConfig>,
+	/// Tor proxy config.
+	#[serde(default)]
+	pub proxy: TorProxyConfig,
+}
+
+impl TorConfig for TorMwixnetConfig {
+	fn use_integrated(&self) -> bool {
+		self.use_integrated
+	}
+
+	fn request_timeout_secs(&self) -> Option<u64> {
+		self.request_timeout_secs
+	}
+
+	fn bootstrap_timeout_secs(&self) -> Option<u64> {
+		self.bootstrap_timeout_secs
+	}
+
+	fn min_circuit_timeout_ms(&self) -> Option<i32> {
+		self.min_circuit_timeout_ms
+	}
+
+	fn bridge_config(&self) -> &[TorBridgeConfig] {
+		&self.bridges
+	}
+
+	fn proxy_config(&self) -> &TorProxyConfig {
+		&self.proxy
+	}
+
+	fn data_dir(&self) -> PathBuf {
+		let mut path = PathBuf::from(&self.data_file_dir);
+		path.push("tor");
+		path
+	}
+
+	fn socks_proxy_addr(&self) -> String {
+		self.socks_proxy_addr.clone()
+	}
+}
+
+impl Default for TorMwixnetConfig {
+	fn default() -> TorMwixnetConfig {
+		TorMwixnetConfig {
+			use_integrated: true,
+			socks_proxy_addr: "127.0.0.1:59050".to_owned(),
+			data_file_dir: ".".into(),
+			request_timeout_secs: Some(REQUEST_TIMEOUT_SECS),
+			bootstrap_timeout_secs: Some(BOOTSTRAP_TIMEOUT_SECS),
+			min_circuit_timeout_ms: Some(MIN_CIRCUIT_TIMEOUT_MS),
+			bridges: Vec::new(),
+			proxy: TorProxyConfig::default(),
+		}
+	}
+}
+
 /// The config attributes saved to disk
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct RawConfig {
@@ -284,12 +374,12 @@ struct RawConfig {
 	wallet_owner_url: String,
 	wallet_owner_secret_path: Option<String>,
 	collect_fees: bool,
-	min_circuit_timeout_ms: i32,
 	data_dir: Option<String>,
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	prev_server: Option<MwixnetServerIdentityKey>,
 	#[serde(with = "grin_onion::crypto::dalek::option_dalek_pubkey_serde", default)]
 	next_server: Option<MwixnetServerIdentityKey>,
+	tor: Option<TorMwixnetConfig>,
 }
 
 fn config_comment(key: &str) -> Option<&'static str> {
@@ -306,11 +396,48 @@ fn config_comment(key: &str) -> Option<&'static str> {
 		"collect_fees" => {
 			Some("Collect excess hop fees in the wallet; false pays all hop fees to miners.")
 		}
-		"min_circuit_timeout_ms" => Some("Minimum Tor circuit build timeout in milliseconds."),
 		"prev_server" => {
 			Some("Previous server Ed25519 identity key; setting it makes this server a mixer.")
 		}
 		"next_server" => Some("Next server Ed25519 identity key; leave unset for the final hop."),
+		"[tor]" => Some("
+#########################################
+### TOR CONFIGURATION                 ###
+#########################################
+"),
+		"use_integrated" => Some("Whether to use integrated Tor library."),
+		"socks_proxy_addr" => Some("The address of the socks proxy for external process."),
+		"data_dir" => Some("Where to find data files."),
+		"data_file_dir" => Some("Tor data directory."),
+		"request_timeout_secs" => Some("Total timeout for request in seconds."),
+		"bootstrap_timeout_secs" => Some("Timeout for bootstrap in seconds."),
+		"min_circuit_timeout_ms" => Some("Minimum Tor circuit build timeout in milliseconds."),
+		"[[tor.bridges]]" => Some("
+
+#########################################
+### TOR BRIDGE                        ###
+#########################################
+"),
+		"[tor.proxy]" => Some("
+
+#Tor bridge relay: allow to send and receive via TOR in a country where it is censored.
+#Enable it by entering a single bridge line. To disable it, you must comment it.
+#Support of the transport: webtunnel, obfs4, and snowflake.
+#webtunnel, obfs4proxy or snowflake client binary must be installed and on your path.
+#[[tor.bridges]]
+#Custom path for client binary
+#bridge_bin_path = \"\"
+
+#For example, the bridge line must be in the following format for obfs4 transport: \"obfs4 [IP:PORT] [FINGERPRINT] cert=[CERT] iat-mode=[IAT-MODE]\"
+#bridge_line = \"\"
+
+#Transport client arguments
+#client_args = []
+
+#########################################
+### TOR PROXY                         ###
+#########################################
+"),
 		_ => None,
 	}
 }
@@ -325,22 +452,52 @@ fn documented_config(raw_config: &RawConfig) -> Result<String, ConfigError> {
 				encoded.push_str("\n\n# ");
 				encoded.push_str(comment);
 			}
+			encoded.push('\n');
+			encoded.push_str(line);
+		} else if line.contains('[') && line.contains(']') {
+			if line == "[tor]" {
+				encoded.push('\n');
+				if raw_config.prev_server.is_none() {
+					encoded.push_str(
+						"\n# Previous server Ed25519 identity key; setting it makes this server a mixer.\n",
+					);
+					encoded
+						.push_str("# prev_server = \"<previous server Ed25519 identity key>\"\n");
+				}
+				if raw_config.next_server.is_none() {
+					encoded.push_str(
+						"\n# Next server Ed25519 identity key; leave unset for the final hop.\n",
+					);
+					encoded.push_str("# next_server = \"<next server Ed25519 identity key>\"\n");
+				}
+			}
+			if let Some(comment) = config_comment(line.trim()) {
+				encoded.push_str(comment);
+				encoded.push('\n');
+				encoded.push_str(line);
+				continue;
+			}
 		}
-		encoded.push('\n');
-		encoded.push_str(line);
 	}
 	encoded.push('\n');
 
-	if raw_config.prev_server.is_none() {
-		encoded.push_str(
-			"\n# Previous server Ed25519 identity key; setting it makes this server a mixer.\n",
-		);
-		encoded.push_str("# prev_server = \"<previous server Ed25519 identity key>\"\n");
-	}
-	if raw_config.next_server.is_none() {
-		encoded.push_str("\n# Next server Ed25519 identity key; leave unset for the final hop.\n");
-		encoded.push_str("# next_server = \"<next server Ed25519 identity key>\"\n");
-	}
+	encoded.push_str(
+		"
+#Type of proxy, eg \"socks4\", \"socks5\", \"http\", \"https\"
+#transport = \"https\"
+
+#Proxy address, eg IP:PORT or Hostname
+#address = \"\"
+
+#Username for the proxy server authentification
+#username = \"\"
+
+#Password for the proxy server authentification
+#password = \"\"
+
+#This computer goes through a firewall that only allows connections to certain ports (Optional)
+#allowed_port = [80, 443]",
+	);
 
 	Ok(encoded)
 }
@@ -364,10 +521,10 @@ pub fn write_config(
 		wallet_owner_url: server_config.wallet_owner_url.clone(),
 		wallet_owner_secret_path: server_config.wallet_owner_secret_path.clone(),
 		collect_fees: server_config.collect_fees,
-		min_circuit_timeout_ms: server_config.min_circuit_timeout_ms,
 		data_dir: Some(server_config.data_dir.clone()),
 		prev_server: server_config.prev_server.clone(),
 		next_server: server_config.next_server.clone(),
+		tor: Some(server_config.tor.clone()),
 	};
 	let encoded = documented_config(&raw_config)?;
 
@@ -380,7 +537,7 @@ pub fn write_config(
 
 /// Reads the server config from the config_path given and decrypts it with the provided password.
 pub fn load_config(
-	config_path: &PathBuf,
+	config_path: &Path,
 	password: &ZeroingString,
 ) -> Result<ServerConfig, ConfigError> {
 	let contents = std::fs::read_to_string(config_path).map_err(ConfigError::ReadConfigError)?;
@@ -393,6 +550,18 @@ pub fn load_config(
 	};
 	let secret_key = encrypted_key.decrypt(password)?;
 
+	let data_dir = raw_config.data_dir.unwrap_or_else(|| {
+		mwixnet_data_path(&global::get_chain_type())
+			.to_str()
+			.unwrap()
+			.to_string()
+	});
+
+	let tor_config = raw_config.tor.unwrap_or_else(|| TorMwixnetConfig {
+		data_file_dir: data_dir.clone(),
+		..Default::default()
+	});
+
 	Ok(ServerConfig {
 		key: secret_key,
 		interval_s: raw_config.interval_s,
@@ -402,15 +571,10 @@ pub fn load_config(
 		wallet_owner_url: raw_config.wallet_owner_url,
 		wallet_owner_secret_path: raw_config.wallet_owner_secret_path,
 		collect_fees: raw_config.collect_fees,
-		min_circuit_timeout_ms: raw_config.min_circuit_timeout_ms,
-		data_dir: raw_config.data_dir.unwrap_or_else(|| {
-			mwixnet_data_path(&global::get_chain_type())
-				.to_str()
-				.unwrap()
-				.to_string()
-		}),
+		data_dir,
 		prev_server: raw_config.prev_server,
 		next_server: raw_config.next_server,
+		tor: tor_config,
 	})
 }
 
@@ -453,10 +617,10 @@ pub fn wallet_owner_url(_chain_type: &ChainTypes) -> String {
 
 #[cfg(test)]
 pub mod test_util {
-	use super::grin_onion;
+	use super::{grin_onion, TorMwixnetConfig};
 	use std::net::TcpListener;
 
-	use crate::config::{ServerConfig, DEFAULT_MIN_CIRCUIT_TIMEOUT_MS};
+	use crate::config::ServerConfig;
 	use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
 	use grin_util::secp::SecretKey;
 	use rand::{thread_rng, Rng};
@@ -466,6 +630,15 @@ pub mod test_util {
 		prev_server: &Option<MwixnetServerIdentityKey>,
 		next_server: &Option<MwixnetServerIdentityKey>,
 	) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+		let data_dir: String = std::env::temp_dir()
+			.join(format!("mwixnet_data_{}", thread_rng().gen::<u64>()))
+			.to_str()
+			.unwrap()
+			.into();
+		let tor = TorMwixnetConfig {
+			data_file_dir: data_dir.clone(),
+			..Default::default()
+		};
 		let config = ServerConfig {
 			key: server_key.clone(),
 			interval_s: 1,
@@ -475,14 +648,10 @@ pub mod test_util {
 			wallet_owner_url: "127.0.0.1:3420".parse()?,
 			wallet_owner_secret_path: None,
 			collect_fees: true,
-			min_circuit_timeout_ms: DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
-			data_dir: std::env::temp_dir()
-				.join(format!("mwixnet_data_{}", thread_rng().gen::<u64>()))
-				.to_str()
-				.unwrap()
-				.into(),
+			data_dir,
 			prev_server: prev_server.clone(),
 			next_server: next_server.clone(),
+			tor,
 		};
 		Ok(config)
 	}
@@ -497,7 +666,7 @@ mod tests {
 
 	#[test]
 	fn public_route() {
-		grin_core::global::set_local_chain_type(ChainTypes::Testnet);
+		global::set_local_chain_type(ChainTypes::Testnet);
 		let first = secp::random_secret(false);
 		let second = secp::random_secret(false);
 		let swap = test_util::local_config(
@@ -597,7 +766,7 @@ mod tests {
 		));
 		assert!(contents.contains(&format!(
 			"# Minimum Tor circuit build timeout in milliseconds.\nmin_circuit_timeout_ms = {}",
-			DEFAULT_MIN_CIRCUIT_TIMEOUT_MS
+			MIN_CIRCUIT_TIMEOUT_MS
 		)));
 		assert!(contents.contains(
 			"# Previous server Ed25519 identity key; setting it makes this server a mixer.\n# prev_server ="
