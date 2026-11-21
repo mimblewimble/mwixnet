@@ -17,7 +17,7 @@ use grin_tor::{start_onion_service, start_tor, stop_onion_service, stop_tor};
 use grin_util::{StopState, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use mwixnet::config::{self, ServerConfig, TorMwixnetConfig};
-use mwixnet::mix_client::{MixClient, MixClientError, MixClientImpl};
+use mwixnet::mix_client::{MixClient, MixClientImpl};
 use mwixnet::node::GrinNode;
 use mwixnet::node::HttpGrinNode;
 use mwixnet::servers;
@@ -314,14 +314,13 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 
 	// Start Tor service.
 	if server_config.next_server.is_some() {
-		start_tor(&server_config.tor).map_err(MixClientError::Tor)?;
+		start_tor(&server_config.tor)?;
 	}
 	start_onion_service(
 		server_config.key.clone(),
 		server_config.addr.to_string().as_str(),
 		&server_config.tor,
-	)
-	.map_err(MixClientError::Tor)?;
+	)?;
 
 	let stop_state = Arc::new(StopState::new());
 	let stop_state_clone = stop_state.clone();
