@@ -13,7 +13,7 @@ use grin_core::global::ChainTypes;
 use grin_onion::crypto;
 use grin_onion::crypto::dalek::MwixnetServerIdentityKey;
 use grin_tor::ov3::OnionV3Address;
-use grin_tor::{start_onion_service, stop_onion_service};
+use grin_tor::{start_onion_service, start_tor, stop_onion_service, stop_tor};
 use grin_util::{StopState, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use mwixnet::config::{self, ServerConfig, TorMwixnetConfig};
@@ -313,6 +313,9 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	};
 
 	// Start Tor service.
+	if server_config.next_server.is_some() {
+		start_tor(&server_config.tor).map_err(MixClientError::Tor)?;
+	}
 	start_onion_service(
 		server_config.key.clone(),
 		server_config.addr.to_string().as_str(),
@@ -327,6 +330,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	rt_handle.spawn(async move {
 		build_signals_fut().await;
 		stop_onion_service(onion_address).unwrap_or_default();
+		stop_tor().unwrap_or_default();
 		stop_state_clone.stop();
 	});
 
