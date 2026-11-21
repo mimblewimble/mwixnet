@@ -158,6 +158,23 @@ impl HttpGrinNode {
 		}
 	}
 
+	fn post_tx_response(response: grin_api::json_rpc::Response) -> Result<(), NodeError> {
+		if let Some(error) = response.error {
+			return Err(NodeError::ResponseParseError(error.into()));
+		}
+		let result: Result<(), grin_api::Error> =
+			serde_json::from_value(response.result.unwrap_or(serde_json::Value::Null))
+				.map_err(NodeError::DecodeResponseError)?;
+		match result {
+			Ok(()) => Ok(()),
+			// A reorg can return the transaction to the node's pool before rebroadcast.
+			Err(grin_api::Error::Internal(msg)) if msg == "Failed to update pool: Duplicate tx" => {
+				Ok(())
+			}
+			Err(error) => Err(NodeError::ApiCommError(error)),
+		}
+	}
+
 	async fn async_send_request<D: serde::de::DeserializeOwned>(
 		&self,
 		method: &str,
@@ -226,9 +243,16 @@ impl GrinNode for HttpGrinNode {
 
 	async fn async_post_tx(&self, tx: &Transaction) -> Result<(), NodeError> {
 		let params = json!([tx, true]);
-		self.async_send_request::<serde_json::Value>("push_transaction", &params)
-			.await?;
-		Ok(())
+		let url = format!("{}{}", self.node_url, ENDPOINT);
+		let response = http::async_send_json_rpc_request(
+			&url,
+			&self.node_foreign_api_secret,
+			"push_transaction",
+			&params,
+		)
+		.await
+		.map_err(NodeError::NodeCommError)?;
+		Self::post_tx_response(response)
 	}
 
 	async fn async_get_kernel(
@@ -397,6 +421,7 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
 	use super::{async_is_spendable, mock::MockGrinNode, GrinNode, HttpGrinNode};
+	use serde_json::{json, Value::Null};
 	use std::sync::Arc;
 
 	use grin_api::{OutputPrintable, OutputType};
@@ -441,6 +466,31 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	#[test]
+	fn post_tx_response() {
+		let accepted = |result, error| {
+			let response = serde_json::from_value(json!({
+				"id": 1, "result": result, "error": error,
+			}))
+			.unwrap();
+			HttpGrinNode::post_tx_response(response).is_ok()
+		};
+		assert!(accepted(json!({"Ok": null}), Null));
+		for (message, expected) in [
+			("Failed to update pool: Duplicate tx", true),
+			("Failed to update pool: Invalid transaction", false),
+		] {
+			assert_eq!(
+				accepted(json!({"Err": {"Internal": message}}), Null),
+				expected
+			);
+		}
+		assert!(!accepted(
+			Null,
+			json!({"code": -32603, "message": "Node failure"})
+		));
 	}
 
 	#[test]

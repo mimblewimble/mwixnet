@@ -7,7 +7,6 @@ pub mod mix_client;
 pub mod node;
 pub mod servers;
 pub mod store;
-pub mod tor;
 pub mod tx;
 pub mod wallet;
 
