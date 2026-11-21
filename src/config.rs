@@ -421,14 +421,12 @@ fn config_comment(key: &str) -> Option<&'static str> {
 #########################################
 ### TOR BRIDGE                        ###
 #########################################
-"),
-		"[tor.proxy]" => Some("
-
 #Tor bridge relay: allow to send and receive via TOR in a country where it is censored.
-#Enable it by entering a single bridge line. To disable it, you must comment it.
+#Set bridge_line to one or more bridge lines. Comment it out to disable bridges.
 #Support of the transport: webtunnel, obfs4, and snowflake.
 #webtunnel, obfs4proxy or snowflake client binary must be installed and on your path.
-#[tor.bridge]
+"),
+		"client_args" => Some("
 #Custom path for client binary
 #bridge_bin_path = \"\"
 
@@ -436,8 +434,8 @@ fn config_comment(key: &str) -> Option<&'static str> {
 #bridge_line = \"\"
 
 #Transport client arguments
-#client_args = []
-
+"),
+		"[tor.proxy]" => Some("
 #########################################
 ### TOR PROXY                         ###
 #########################################
