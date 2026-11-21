@@ -456,8 +456,6 @@ fn documented_config(raw_config: &RawConfig) -> Result<String, ConfigError> {
 				encoded.push_str("\n\n# ");
 				encoded.push_str(comment);
 			}
-			encoded.push('\n');
-			encoded.push_str(line);
 		} else if line.contains('[') && line.contains(']') {
 			if line == "[tor]" {
 				encoded.push('\n');
@@ -477,11 +475,10 @@ fn documented_config(raw_config: &RawConfig) -> Result<String, ConfigError> {
 			}
 			if let Some(comment) = config_comment(line.trim()) {
 				encoded.push_str(comment);
-				encoded.push('\n');
-				encoded.push_str(line);
-				continue;
 			}
 		}
+		encoded.push('\n');
+		encoded.push_str(line);
 	}
 	encoded.push('\n');
 
@@ -753,7 +750,10 @@ mod tests {
 	#[test]
 	fn writes_config_help() {
 		let server_key = secp::random_secret(false);
-		let config = test_util::local_config(&server_key, &None, &None).unwrap();
+		let mut config = test_util::local_config(&server_key, &None, &None).unwrap();
+		config.tor.bridge.bridge_line = Some(
+			"192.0.2.1:9001 0123456789ABCDEF0123456789ABCDEF01234567\n192.0.2.2:9001 0123456789ABCDEF0123456789ABCDEF01234567".into(),
+		);
 		let password = ZeroingString::from("password");
 		let path =
 			std::env::temp_dir().join(format!("mwixnet-config-{}.toml", thread_rng().gen::<u64>()));
