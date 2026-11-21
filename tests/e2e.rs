@@ -25,7 +25,7 @@ use crate::common::wallet::GrinWalletManager;
 use grin_chain::{Chain, Options};
 use grin_core::core::hash::Hashed;
 use grin_core::global;
-use grin_p2p::tor::start_tor;
+use grin_tor::start_tor;
 use grin_util::logger::LoggingConfig;
 use mwixnet::config::TorMwixnetConfig;
 

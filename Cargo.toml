@@ -33,8 +33,9 @@ grin_api = { path = "grin-wallet/grin/api" }
 grin_core = { path = "grin-wallet/grin/core" }
 grin_chain = { path = "grin-wallet/grin/chain" }
 grin_keychain = { path = "grin-wallet/grin/keychain" }
-grin_p2p = { path = "grin-wallet/grin/p2p", features = ["tor-static"] }
+grin_p2p = { path = "grin-wallet/grin/p2p" }
 grin_store = { path = "grin-wallet/grin/store" }
+grin_tor = { path = "grin-wallet/grin/tor", features = ["tor-static"] }
 grin_util = { path = "grin-wallet/grin/util" }
 grin_wallet_api = { path = "grin-wallet/api" }
 grin_wallet_config = { path = "grin-wallet/config" }

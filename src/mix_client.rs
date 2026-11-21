@@ -21,8 +21,8 @@ use grin_core::ser;
 use grin_core::ser::ProtocolVersion;
 use grin_onion::crypto::dalek::{self, MwixnetServerIdentityKey};
 use grin_onion::onion::Onion;
-use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::TorHttpClient;
+use grin_tor::ov3::OnionV3Address;
+use grin_tor::TorHttpClient;
 use grin_wallet_config::TorWalletConfig;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 
@@ -36,7 +36,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum MixClientError {
 	#[error("Tor Error: {0:?}")]
-	Tor(grin_p2p::tor::Error),
+	Tor(grin_tor::Error),
 	#[error("Communication Error: {0:?}")]
 	CommError(HttpError),
 	#[error("Dalek Error: {0:?}")]

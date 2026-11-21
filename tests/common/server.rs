@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use grin_core::core::Transaction;
-use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::{onion_service_status, start_onion_service, stop_onion_service, ServiceStatus};
+use grin_tor::ov3::OnionV3Address;
+use grin_tor::{onion_service_status, start_onion_service, stop_onion_service, ServiceStatus};
 use grin_util::secp::SecretKey;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;

@@ -19,8 +19,8 @@ use serde_derive::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use grin_p2p::tor::ov3::OnionV3Address;
-use grin_p2p::tor::start_tor;
+use grin_tor::ov3::OnionV3Address;
+use grin_tor::start_tor;
 use grin_wallet_config::config::GRIN_HOME;
 use grin_wallet_libwallet::mwixnet::{MwixnetClient, MwixnetClientImpl, MwixnetResponse};
 use mwixnet::config::{ConfigError, TorMwixnetConfig};

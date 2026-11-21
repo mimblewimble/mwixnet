@@ -15,11 +15,11 @@
 use grin_core::global;
 use grin_core::global::ChainTypes;
 use grin_onion::crypto::secp::SecretKey;
-use grin_p2p::tor::config::{
+use grin_tor::config::{
 	TorBridgeConfig, TorConfig, TorOutboundProxy, TorProxyConfig, BOOTSTRAP_TIMEOUT_SECS,
 	MIN_CIRCUIT_TIMEOUT_MS, REQUEST_TIMEOUT_SECS,
 };
-use grin_p2p::tor::ov3::OnionV3Address;
+use grin_tor::ov3::OnionV3Address;
 use grin_util::{file, ToHex, ZeroingString};
 use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
 use grin_wallet_libwallet::mwixnet::{onion as grin_onion, MwixnetServerPublicKey};
@@ -416,7 +416,7 @@ fn config_comment(key: &str) -> Option<&'static str> {
 		"request_timeout_secs" => Some("Total timeout for request in seconds."),
 		"bootstrap_timeout_secs" => Some("Timeout for bootstrap in seconds."),
 		"min_circuit_timeout_ms" => Some("Minimum Tor circuit build timeout in milliseconds."),
-		"[[tor.bridges]]" => Some("
+		"[tor.bridge]" => Some("
 
 #########################################
 ### TOR BRIDGE                        ###
@@ -428,7 +428,7 @@ fn config_comment(key: &str) -> Option<&'static str> {
 #Enable it by entering a single bridge line. To disable it, you must comment it.
 #Support of the transport: webtunnel, obfs4, and snowflake.
 #webtunnel, obfs4proxy or snowflake client binary must be installed and on your path.
-#[[tor.bridge]]
+#[tor.bridge]
 #Custom path for client binary
 #bridge_bin_path = \"\"
 
