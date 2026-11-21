@@ -329,8 +329,18 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 	let onion_address = server_config.onion_address().to_string();
 	rt_handle.spawn(async move {
 		build_signals_fut().await;
-		stop_onion_service(onion_address).unwrap_or_default();
-		stop_tor().unwrap_or_default();
+		if let Err(error) = tokio::task::spawn_blocking(move || {
+			if let Err(error) = stop_onion_service(onion_address) {
+				eprintln!("Could not stop Tor service cleanly: {error}");
+			}
+			if let Err(error) = stop_tor() {
+				eprintln!("Could not stop Tor sender cleanly: {error}");
+			}
+		})
+		.await
+		{
+			eprintln!("Tor shutdown task failed: {error}");
+		}
 		stop_state_clone.stop();
 	});
 
