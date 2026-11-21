@@ -87,15 +87,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 						let start = Instant::now();
 
 						let client = MwixnetClientImpl::new(config, url.clone());
-						let result = client.health().await;
+						let result = client.health().await.map_err(|error| error.to_string());
 
 						let elapsed = start.elapsed().as_secs_f64();
 						match result {
-							Ok(res) => res == MwixnetResponse::Accepted,
-							Err(error) => {
+							Ok(MwixnetResponse::Accepted) => {
+								println!("{name} ok {elapsed:.2}s");
+								true
+							}
+							Ok(MwixnetResponse::Rejected(error)) | Err(error) => {
 								println!(
 									"{name} failed {elapsed:.2}s {}",
-									error.to_string().replace(['\n', '\r'], " ")
+									error.replace(['\n', '\r'], " ")
 								);
 								false
 							}
