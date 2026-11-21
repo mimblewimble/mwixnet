@@ -426,8 +426,7 @@ fn config_comment(key: &str) -> Option<&'static str> {
 #Support of the transport: webtunnel, obfs4, and snowflake.
 #webtunnel, obfs4proxy or snowflake client binary must be installed and on your path.
 "),
-		"client_args" => Some("
-#Custom path for client binary
+		"client_args" => Some("Custom path for client binary
 #bridge_bin_path = \"\"
 
 #For example, the bridge line must be in the following format for obfs4 transport: \"obfs4 [IP:PORT] [FINGERPRINT] cert=[CERT] iat-mode=[IAT-MODE]\"
