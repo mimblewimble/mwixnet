@@ -292,7 +292,8 @@ impl IntegrationGrinWallet {
 
 	pub fn owner_api(
 		&self,
-	) -> Arc<Owner<DefaultLCProvider<HTTPNodeClient, ExtKeychain>, HTTPNodeClient, ExtKeychain>> {
+	) -> Arc<Owner<DefaultLCProvider<HTTPNodeClient, ExtKeychain>, HTTPNodeClient, ExtKeychain>>
+	{
 		self.owner_api.clone()
 	}
 

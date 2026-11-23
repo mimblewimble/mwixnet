@@ -107,7 +107,7 @@ pub fn listen(
 	let server = Arc::new(tokio::sync::Mutex::new(server));
 
 	let rpc_server = RPCSwapServer {
-		started_at: std::time::Instant::now(),
+		started_at: Instant::now(),
 		server_config: server_config.clone(),
 		server: server.clone(),
 	};
@@ -133,7 +133,7 @@ mod tests {
 	use grin_onion::crypto::comsig::ComSignature;
 	use grin_onion::crypto::secp;
 
-	use crate::config::ServerConfig;
+	use crate::config::{ServerConfig, TorMwixnetConfig};
 	use crate::servers::swap::mock::MockSwapServer;
 	use crate::servers::swap::{SwapError, SwapServer};
 	use crate::servers::swap_rpc::{RPCSwapServer, SwapReq};
@@ -145,7 +145,7 @@ mod tests {
 
 	/// Spin up a temporary web service, query the API, then cleanup and return response
 	async fn async_make_request(
-		server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
+		server: Arc<Mutex<dyn SwapServer>>,
 		req: String,
 		runtime_handle: &tokio::runtime::Handle,
 	) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -158,10 +158,10 @@ mod tests {
 			wallet_owner_url: "127.0.0.1:3420".parse()?,
 			wallet_owner_secret_path: None,
 			collect_fees: true,
-			min_circuit_timeout_ms: crate::config::DEFAULT_MIN_CIRCUIT_TIMEOUT_MS,
 			data_dir: "".to_string(),
 			prev_server: None,
 			next_server: None,
+			tor: TorMwixnetConfig::default(),
 		};
 
 		let rpc_server = RPCSwapServer {
@@ -177,8 +177,7 @@ mod tests {
 
 		let request = Request::post(uri)
 			.header("Content-Type", "application/json")
-			.body(Full::new(Bytes::from(req)))
-			.unwrap();
+			.body(Full::new(Bytes::from(req)))?;
 
 		let response = Client::builder(TokioExecutor::new())
 			.build_http()

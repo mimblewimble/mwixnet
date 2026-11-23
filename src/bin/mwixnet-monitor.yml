@@ -3,12 +3,17 @@ about: Check onion health every two minutes
 
 args:
   - data_dir:
-      help: Tor data directory separate from the servers
+      help: Tor data directory (default ~/.grin/mwixnet-monitor)
       long: data_dir
       short: d
       value_name: DIR
       takes_value: true
       required: false
+  - config_file:
+      help: Load Tor settings except the data directory
+      short: c
+      long: config_file
+      takes_value: true
   - once:
       help: Check once and exit with an error if any target fails
       long: once
