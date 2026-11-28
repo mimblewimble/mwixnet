@@ -53,4 +53,4 @@ grin_wallet_controller = { path = "grin-wallet/controller" }
 grin_servers = { path = "grin-wallet/grin/servers" }
 
 [patch.crates-io]
-lmdb-master-sys = { git = "https://github.com/wiesche89/heed", rev = "4c7252128a58819406f2978adfc8d41365e7f77a" }
+lmdb-master-sys = { git = "https://github.com/mimblewimble/heed", rev = "f3b6d4a28d7a42d80a99ebbf161aa0cfb40742ec" }
