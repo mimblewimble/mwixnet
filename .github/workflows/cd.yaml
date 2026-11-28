@@ -375,3 +375,35 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: release/*
+
+  telegram-notify:
+    name: Telegram Notification
+    if: always()
+    needs:
+      - linux-release
+      - linux-musl
+      - bsd
+      - macos-release-x86
+      - macos-release-arm64
+      - windows-release
+      - docker
+      - snap
+      - release
+    uses: ./.github/workflows/telegram.yaml
+    secrets: inherit
+    with:
+      title: MWixnet CD
+      status: ${{ contains(join(needs.*.result, ','), 'failure') && 'failed' || contains(join(needs.*.result, ','), 'cancelled') && 'cancelled' || 'success' }}
+      details: |
+        <b>Linux:</b> ${{ needs['linux-release'].result }}
+        <b>musl:</b> ${{ needs['linux-musl'].result }}
+        <b>BSD:</b> ${{ needs.bsd.result }}
+        <b>macOS x86:</b> ${{ needs['macos-release-x86'].result }}
+        <b>macOS arm64:</b> ${{ needs['macos-release-arm64'].result }}
+        <b>Windows:</b> ${{ needs['windows-release'].result }}
+        <b>Docker:</b> ${{ needs.docker.result }}
+        <b>Snap:</b> ${{ needs.snap.result }}
+        <b>Release:</b> ${{ needs.release.result }}
+      image_tag: ${{ needs.docker.outputs.image_tag }}
+      artifact_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      commit_message: ${{ github.event.head_commit.message }}

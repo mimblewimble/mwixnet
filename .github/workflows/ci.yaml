@@ -175,3 +175,22 @@ jobs:
       - name: Tests
         timeout-minutes: 10
         run: cargo test --release --locked --test e2e
+
+  telegram-notify:
+    name: Telegram Notification
+    needs: [clippy, linux-tests, musl-tests, macos-tests, windows-tests, bsd-tests, e2e-tests]
+    if: always() && github.event_name == 'push'
+    uses: ./.github/workflows/telegram.yaml
+    secrets: inherit
+    with:
+      title: MWixnet CI
+      status: ${{ contains(join(needs.*.result, ','), 'failure') && 'failed' || contains(join(needs.*.result, ','), 'cancelled') && 'cancelled' || 'success' }}
+      details: |
+        <b>Clippy:</b> ${{ needs.clippy.result }}
+        <b>Linux:</b> ${{ needs.linux-tests.result }}
+        <b>musl:</b> ${{ needs.musl-tests.result }}
+        <b>macOS:</b> ${{ needs.macos-tests.result }}
+        <b>Windows:</b> ${{ needs.windows-tests.result }}
+        <b>BSD:</b> ${{ needs.bsd-tests.result }}
+        <b>E2E:</b> ${{ needs.e2e-tests.result }}
+      commit_message: ${{ github.event.head_commit.message }}
