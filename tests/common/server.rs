@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use grin_core::core::Transaction;
 use grin_tor::ov3::OnionV3Address;
-use grin_tor::{onion_service_status, start_onion_service, stop_onion_service, ServiceStatus};
+use grin_tor::{start_onion_service, stop_onion_service};
 use grin_util::secp::SecretKey;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
@@ -39,7 +39,7 @@ pub struct IntegrationSwapServer {
 	client: MwixnetClientImpl<TorMwixnetConfig>,
 	swap_server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
 	_rpc_server: mwixnet::servers::rpc::RpcServer,
-	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
+	_wallet: Arc<IntegrationGrinWallet>,
 }
 
 impl IntegrationSwapServer {
@@ -71,7 +71,7 @@ pub struct IntegrationMixServer {
 	server_key: SecretKey,
 	onion_pubkey: MwixnetServerPublicKey,
 	_rpc_server: mwixnet::servers::rpc::RpcServer,
-	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
+	_wallet: Arc<IntegrationGrinWallet>,
 }
 
 async fn start_tor_listener(config: &mwixnet::ServerConfig, addr: &SocketAddr) {
@@ -79,20 +79,31 @@ async fn start_tor_listener(config: &mwixnet::ServerConfig, addr: &SocketAddr) {
 		start_onion_service(config.key.clone(), &addr.to_string(), &config.tor)
 	})
 	.unwrap();
-	let address = config.onion_address().to_string();
-	tokio::time::timeout(Duration::from_secs(120), async {
-		while !matches!(
-			onion_service_status(address.clone()),
-			ServiceStatus::Running | ServiceStatus::Bootstrapped
-		) {
-			tokio::time::sleep(Duration::from_millis(500)).await;
+	let client = MwixnetClientImpl::new(config.tor.clone(), config.onion_address());
+	tokio::time::timeout(Duration::from_secs(180), async {
+		loop {
+			match client.health().await {
+				Ok(MwixnetResponse::Accepted) => break,
+				Ok(MwixnetResponse::Rejected(error)) => {
+					panic!("Onion service health check failed: {error}")
+				}
+				Err(error) => eprintln!(
+					"Waiting for onion service at {}: {error}",
+					client.server_url()
+				),
+			}
+			tokio::time::sleep(Duration::from_secs(2)).await;
 		}
 	})
 	.await
-	.expect("Tor listener did not become ready");
+	.unwrap_or_else(|_| {
+		panic!(
+			"Onion service at {} was not reachable within 180s",
+			client.server_url()
+		)
+	});
 }
 
-#[allow(clippy::await_holding_lock)]
 async fn async_new_swap_server(
 	data_dir: &str,
 	rt_handle: &tokio::runtime::Handle,
@@ -101,7 +112,8 @@ async fn async_new_swap_server(
 	node: &Arc<grin_util::Mutex<IntegrationGrinNode>>,
 	next_server: Option<&IntegrationMixServer>,
 ) -> IntegrationSwapServer {
-	let wallet = wallets.async_new_wallet(&node.lock().api_address()).await;
+	let node_addr = node.lock().api_address();
+	let wallet = wallets.async_new_wallet(&node_addr).await;
 
 	let mut tor = TorMwixnetConfig::default();
 	let mut tor_dir = PathBuf::from(data_dir);
@@ -117,7 +129,7 @@ async fn async_new_swap_server(
 			.unwrap(),
 		grin_node_url: node.lock().api_address().to_string(),
 		grin_node_foreign_api_secret_path: None,
-		wallet_owner_url: wallet.lock().owner_address().to_string(),
+		wallet_owner_url: wallet.owner_address().to_string(),
 		wallet_owner_secret_path: None,
 		collect_fees: true,
 		data_dir: data_dir.to_string(),
@@ -139,7 +151,7 @@ async fn async_new_swap_server(
 			))),
 			None => None,
 		},
-		Some(wallet.lock().get_client()),
+		Some(wallet.get_client()),
 		node.lock().to_client(),
 		store,
 	)
@@ -156,7 +168,6 @@ async fn async_new_swap_server(
 	}
 }
 
-#[allow(clippy::await_holding_lock)]
 #[allow(clippy::too_many_arguments)]
 async fn async_new_mix_server(
 	data_dir: &str,
@@ -167,7 +178,8 @@ async fn async_new_mix_server(
 	prev_server: MwixnetServerIdentityKey,
 	next_server: Option<&IntegrationMixServer>,
 ) -> IntegrationMixServer {
-	let wallet = wallets.async_new_wallet(&node.lock().api_address()).await;
+	let node_addr = node.lock().api_address();
+	let wallet = wallets.async_new_wallet(&node_addr).await;
 
 	let mut tor = TorMwixnetConfig::default();
 	let mut tor_dir = PathBuf::from(data_dir);
@@ -184,7 +196,7 @@ async fn async_new_mix_server(
 			.unwrap(),
 		grin_node_url: node.lock().api_address().to_string(),
 		grin_node_foreign_api_secret_path: None,
-		wallet_owner_url: wallet.lock().owner_address().to_string(),
+		wallet_owner_url: wallet.owner_address().to_string(),
 		wallet_owner_secret_path: None,
 		collect_fees: true,
 		data_dir: data_dir.to_string(),
@@ -203,7 +215,7 @@ async fn async_new_mix_server(
 			))),
 			None => None,
 		},
-		Some(wallet.lock().get_client()),
+		Some(wallet.get_client()),
 		node.lock().to_client(),
 	)
 	.unwrap();
