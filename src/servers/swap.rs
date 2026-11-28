@@ -215,14 +215,17 @@ impl SwapServerImpl {
 		let inputs: Vec<Input> = filtered.iter().map(|s| s.input).collect();
 		let output_excesses: Vec<SecretKey> = filtered.iter().map(|s| s.excess.clone()).collect();
 
+		let components = tx::TxComponents {
+			offset,
+			outputs,
+			kernels,
+		};
 		let tx = tx::async_assemble_tx(
 			self.wallet.as_ref(),
 			&inputs,
-			&outputs,
-			&kernels,
+			&components,
 			self.get_fee_base(),
 			fees_paid,
-			&offset,
 			&output_excesses,
 		)
 		.await?;
@@ -231,7 +234,7 @@ impl SwapServerImpl {
 		self.node.async_post_tx(&tx).await?;
 
 		let input_count = inputs.len();
-		let output_count = outputs.len();
+		let output_count = components.outputs.len();
 		let failed_count = failed.len();
 		store.save_swap_tx(&SwapTx {
 			tx: tx.clone(),

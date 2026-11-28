@@ -26,7 +26,6 @@ use grin_core::core::hash::{Hash, Hashed};
 use grin_core::core::{Block, BlockHeader, Transaction};
 use grin_core::{consensus, global};
 use grin_keychain::Identifier;
-use grin_util::Mutex;
 use rand::{thread_rng, Rng};
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +43,7 @@ impl Miner {
 
 	pub async fn async_mine_empty_blocks(
 		&self,
-		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
+		wallet: &Arc<IntegrationGrinWallet>,
 		num_blocks: usize,
 	) {
 		for _ in 0..num_blocks {
@@ -55,7 +54,7 @@ impl Miner {
 	/// Builds a new block on top of the existing chain.
 	pub async fn async_mine_next_block(
 		&self,
-		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
+		wallet: &Arc<IntegrationGrinWallet>,
 		txs: &[Transaction],
 	) {
 		info!("Starting test miner loop.");
@@ -125,7 +124,7 @@ impl Miner {
 	// Warning: This call does not return until/unless a new block can be built
 	async fn async_get_block(
 		&self,
-		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
+		wallet: &Arc<IntegrationGrinWallet>,
 		txs: &[Transaction],
 		key_id: Option<Identifier>,
 	) -> (Block, BlockFees) {
@@ -172,10 +171,9 @@ impl Miner {
 
 	/// Builds a new block with the chain head as previous and eligible
 	/// transactions from the pool.
-	#[allow(clippy::await_holding_lock)]
 	async fn async_build_block(
 		&self,
-		wallet: &Arc<Mutex<IntegrationGrinWallet>>,
+		wallet: &Arc<IntegrationGrinWallet>,
 		txs: &[Transaction],
 		key_id: Option<Identifier>,
 	) -> Result<(Block, BlockFees), grin_servers::common::types::Error> {
@@ -201,7 +199,7 @@ impl Miner {
 			height,
 		};
 
-		let res = wallet.lock().async_create_coinbase(&block_fees).await?;
+		let res = wallet.async_create_coinbase(&block_fees).await?;
 		let output = res.output;
 		let kernel = res.kernel;
 		let block_fees = BlockFees {

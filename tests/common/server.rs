@@ -39,7 +39,7 @@ pub struct IntegrationSwapServer {
 	client: MwixnetClientImpl<TorMwixnetConfig>,
 	swap_server: Arc<tokio::sync::Mutex<dyn SwapServer>>,
 	_rpc_server: mwixnet::servers::rpc::RpcServer,
-	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
+	_wallet: Arc<IntegrationGrinWallet>,
 }
 
 impl IntegrationSwapServer {
@@ -71,7 +71,7 @@ pub struct IntegrationMixServer {
 	server_key: SecretKey,
 	onion_pubkey: MwixnetServerPublicKey,
 	_rpc_server: mwixnet::servers::rpc::RpcServer,
-	_wallet: Arc<grin_util::Mutex<IntegrationGrinWallet>>,
+	_wallet: Arc<IntegrationGrinWallet>,
 }
 
 async fn start_tor_listener(config: &mwixnet::ServerConfig, addr: &SocketAddr) {
@@ -92,7 +92,6 @@ async fn start_tor_listener(config: &mwixnet::ServerConfig, addr: &SocketAddr) {
 	.expect("Tor listener did not become ready");
 }
 
-#[allow(clippy::await_holding_lock)]
 async fn async_new_swap_server(
 	data_dir: &str,
 	rt_handle: &tokio::runtime::Handle,
@@ -101,7 +100,8 @@ async fn async_new_swap_server(
 	node: &Arc<grin_util::Mutex<IntegrationGrinNode>>,
 	next_server: Option<&IntegrationMixServer>,
 ) -> IntegrationSwapServer {
-	let wallet = wallets.async_new_wallet(&node.lock().api_address()).await;
+	let node_addr = node.lock().api_address();
+	let wallet = wallets.async_new_wallet(&node_addr).await;
 
 	let mut tor = TorMwixnetConfig::default();
 	let mut tor_dir = PathBuf::from(data_dir);
@@ -117,7 +117,7 @@ async fn async_new_swap_server(
 			.unwrap(),
 		grin_node_url: node.lock().api_address().to_string(),
 		grin_node_foreign_api_secret_path: None,
-		wallet_owner_url: wallet.lock().owner_address().to_string(),
+		wallet_owner_url: wallet.owner_address().to_string(),
 		wallet_owner_secret_path: None,
 		collect_fees: true,
 		data_dir: data_dir.to_string(),
@@ -139,7 +139,7 @@ async fn async_new_swap_server(
 			))),
 			None => None,
 		},
-		Some(wallet.lock().get_client()),
+		Some(wallet.get_client()),
 		node.lock().to_client(),
 		store,
 	)
@@ -156,7 +156,6 @@ async fn async_new_swap_server(
 	}
 }
 
-#[allow(clippy::await_holding_lock)]
 #[allow(clippy::too_many_arguments)]
 async fn async_new_mix_server(
 	data_dir: &str,
@@ -167,7 +166,8 @@ async fn async_new_mix_server(
 	prev_server: MwixnetServerIdentityKey,
 	next_server: Option<&IntegrationMixServer>,
 ) -> IntegrationMixServer {
-	let wallet = wallets.async_new_wallet(&node.lock().api_address()).await;
+	let node_addr = node.lock().api_address();
+	let wallet = wallets.async_new_wallet(&node_addr).await;
 
 	let mut tor = TorMwixnetConfig::default();
 	let mut tor_dir = PathBuf::from(data_dir);
@@ -184,7 +184,7 @@ async fn async_new_mix_server(
 			.unwrap(),
 		grin_node_url: node.lock().api_address().to_string(),
 		grin_node_foreign_api_secret_path: None,
-		wallet_owner_url: wallet.lock().owner_address().to_string(),
+		wallet_owner_url: wallet.owner_address().to_string(),
 		wallet_owner_secret_path: None,
 		collect_fees: true,
 		data_dir: data_dir.to_string(),
@@ -203,12 +203,33 @@ async fn async_new_mix_server(
 			))),
 			None => None,
 		},
-		Some(wallet.lock().get_client()),
+		Some(wallet.get_client()),
 		node.lock().to_client(),
 	)
 	.unwrap();
 
 	start_tor_listener(&server_config, rpc_server.address()).await;
+
+	let client = MwixnetClientImpl::new(server_config.tor.clone(), server_config.onion_address());
+	tokio::time::timeout(Duration::from_secs(180), async {
+		loop {
+			match client.health().await {
+				Ok(MwixnetResponse::Accepted) => break,
+				Ok(MwixnetResponse::Rejected(error)) => {
+					panic!("Mixer health check failed: {error}")
+				}
+				Err(error) => eprintln!("Waiting for mixer at {}: {error}", client.server_url()),
+			}
+			tokio::time::sleep(Duration::from_secs(2)).await;
+		}
+	})
+	.await
+	.unwrap_or_else(|_| {
+		panic!(
+			"Mixer at {} was not reachable within 180s",
+			client.server_url()
+		)
+	});
 
 	IntegrationMixServer {
 		server_key: server_key.clone(),

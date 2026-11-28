@@ -19,7 +19,7 @@ itertools = { version = "0.12.0" }
 jsonrpc-core = "18.0.0"
 jsonrpc-derive = "18.0.0"
 rand = "0.7.3"
-ring = "0.16"
+ring = "0.17.14"
 rpassword = "4.0"
 serde = { version = "1", features = ["derive"] }
 serde_derive = "1"
@@ -51,3 +51,6 @@ function_name = "0.3.0"
 grin_wallet_libwallet = { path = "grin-wallet/libwallet", features = ["mwixnet-test"] }
 grin_wallet_controller = { path = "grin-wallet/controller" }
 grin_servers = { path = "grin-wallet/grin/servers" }
+
+[patch.crates-io]
+lmdb-master-sys = { git = "https://github.com/wiesche89/heed", rev = "4c7252128a58819406f2978adfc8d41365e7f77a" }
