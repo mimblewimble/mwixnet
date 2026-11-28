@@ -294,6 +294,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 120
     env:
+      CC_x86_64_pc_windows_msvc: clang-cl
       ROARING_ARCH: x86-64-v2
     steps:
       - name: Checkout

@@ -88,6 +88,7 @@ jobs:
     name: Windows Tests
     runs-on: windows-2022
     env:
+      CC_x86_64_pc_windows_msvc: clang-cl
       ROARING_ARCH: x86-64-v2
     steps:
       - uses: actions/checkout@v6

@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use grin_core::core::Transaction;
 use grin_tor::ov3::OnionV3Address;
-use grin_tor::{onion_service_status, start_onion_service, stop_onion_service, ServiceStatus};
+use grin_tor::{start_onion_service, stop_onion_service};
 use grin_util::secp::SecretKey;
 use grin_wallet_libwallet::mwixnet::onion as grin_onion;
 use grin_wallet_libwallet::mwixnet::onion::crypto::dalek::MwixnetServerIdentityKey;
@@ -79,17 +79,29 @@ async fn start_tor_listener(config: &mwixnet::ServerConfig, addr: &SocketAddr) {
 		start_onion_service(config.key.clone(), &addr.to_string(), &config.tor)
 	})
 	.unwrap();
-	let address = config.onion_address().to_string();
-	tokio::time::timeout(Duration::from_secs(120), async {
-		while !matches!(
-			onion_service_status(address.clone()),
-			ServiceStatus::Running | ServiceStatus::Bootstrapped
-		) {
-			tokio::time::sleep(Duration::from_millis(500)).await;
+	let client = MwixnetClientImpl::new(config.tor.clone(), config.onion_address());
+	tokio::time::timeout(Duration::from_secs(180), async {
+		loop {
+			match client.health().await {
+				Ok(MwixnetResponse::Accepted) => break,
+				Ok(MwixnetResponse::Rejected(error)) => {
+					panic!("Onion service health check failed: {error}")
+				}
+				Err(error) => eprintln!(
+					"Waiting for onion service at {}: {error}",
+					client.server_url()
+				),
+			}
+			tokio::time::sleep(Duration::from_secs(2)).await;
 		}
 	})
 	.await
-	.expect("Tor listener did not become ready");
+	.unwrap_or_else(|_| {
+		panic!(
+			"Onion service at {} was not reachable within 180s",
+			client.server_url()
+		)
+	});
 }
 
 async fn async_new_swap_server(
@@ -209,27 +221,6 @@ async fn async_new_mix_server(
 	.unwrap();
 
 	start_tor_listener(&server_config, rpc_server.address()).await;
-
-	let client = MwixnetClientImpl::new(server_config.tor.clone(), server_config.onion_address());
-	tokio::time::timeout(Duration::from_secs(180), async {
-		loop {
-			match client.health().await {
-				Ok(MwixnetResponse::Accepted) => break,
-				Ok(MwixnetResponse::Rejected(error)) => {
-					panic!("Mixer health check failed: {error}")
-				}
-				Err(error) => eprintln!("Waiting for mixer at {}: {error}", client.server_url()),
-			}
-			tokio::time::sleep(Duration::from_secs(2)).await;
-		}
-	})
-	.await
-	.unwrap_or_else(|_| {
-		panic!(
-			"Mixer at {} was not reachable within 180s",
-			client.server_url()
-		)
-	});
 
 	IntegrationMixServer {
 		server_key: server_key.clone(),
